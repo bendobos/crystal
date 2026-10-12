@@ -57,7 +57,7 @@ export const useStore = create<AppState>((set, get) => ({
   tool: 'camera',
   brush: { mode: 'pull', size: 0.9, strength: 0.6 },
   panel: 'form',
-  panelOpen: true,
+  panelOpen: typeof window === 'undefined' || window.innerWidth >= 760,
   selectedLight: null,
   selectedPoint: null,
   status: null,

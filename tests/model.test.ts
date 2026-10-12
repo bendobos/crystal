@@ -5,7 +5,7 @@ import { decodeShare, encodeShare, fromJSON, toJSON } from '../src/model/seriali
 import { createDetail } from '../src/geometry/fields';
 import { displayTransform, inverseDisplay, hexToSrgb } from '../src/render/color';
 import { cauchy, iorAt, previewTaps, spectralNormalization, wavelengthToLinearSrgb } from '../src/render/spectral';
-import { frameAt } from '../src/export/video';
+import { frameAt } from '../src/export/loops';
 import type { Vec3 } from '../src/model/types';
 
 function figureEight(n = 200, a = 200): P2[] {

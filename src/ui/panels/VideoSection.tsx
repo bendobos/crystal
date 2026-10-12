@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useStore } from '../../model/store';
 import { useExport } from '../../export/exportStore';
-import { exportVideo, LOOP_LABEL, type LoopKind, type VideoSettings } from '../../export/video';
+import { LOOP_LABEL, type LoopKind, type VideoSettings } from '../../export/loops';
 import { Button, Section, Segmented, Slider } from '../controls';
 import { IconVideo } from '../icons';
 
@@ -19,10 +19,12 @@ export function VideoSection() {
     const { set } = useExport.getState();
     set({ job: { kind: 'video', progress: { label: 'Vorbereiten…', fraction: 0, eta: null }, abort, files: null, error: null } });
     useStore.getState().set({ exporting: true });
-    exportVideo(doc, target, settings, (progress) => {
+    // the encoder library is only loaded when a video is actually rendered
+    import('../../export/video')
+      .then(({ exportVideo }) => exportVideo(doc, target, settings, (progress) => {
       const job = useExport.getState().job;
       if (job) set({ job: { ...job, progress } });
-    }, abort.signal)
+    }, abort.signal))
       .then((file) => {
         const job = useExport.getState().job;
         if (job) set({ job: { ...job, files: [file], progress: { label: 'Fertig', fraction: 1, eta: null } } });
