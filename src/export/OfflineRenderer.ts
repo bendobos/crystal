@@ -9,6 +9,16 @@ import { BloomChain } from '../render/Bloom';
 import type { OutputSpace } from '../render/color';
 import { yieldTask } from '../util/yield';
 
+/** Rotated-grid sub-pixel offsets for the deterministic tracer. */
+const PREVIEW_AA: [number, number][] = [
+  [0.125, 0.375],
+  [-0.375, 0.125],
+  [0.375, -0.125],
+  [-0.125, -0.375],
+  [0.25, 0.25],
+  [-0.25, -0.25],
+];
+
 export interface OfflineOptions {
   width: number;
   height: number;
@@ -100,7 +110,8 @@ export class OfflineRenderer {
     const tilesX = Math.ceil(W / tile);
     const tilesY = Math.ceil(H / tile);
     const preview = !!opts.preview;
-    const passes = preview ? 1 : samples;
+    // the live tracer is deterministic: a few jittered passes are enough for clean edges
+    const passes = preview ? PREVIEW_AA.length : samples;
     const bloomPasses = fx.bloom > 0 ? (preview ? 1 : 24) : 0;
     const totalWork = tilesX * tilesY * passes + bloomPasses;
     let done = 0;
@@ -116,7 +127,7 @@ export class OfflineRenderer {
       bloomSrc = [this.floatRT(bw, bh), this.floatRT(bw, bh)];
       const frame: Rect = { x: 0, y: 0, w: bw, h: bh };
       for (let s = 0; s < bloomPasses; s++) {
-        if (preview) await this.previewPass(bloomSrc, bw, bh, frame, basis, tanHalf, opts.signal);
+        if (preview) await this.previewPass(bloomSrc, 0, bw, bh, frame, basis, tanHalf, opts.signal);
         else await this.pathPass(bloomSrc, s, bw, bh, frame, basis, tanHalf, opts.signal);
         done++;
         progress();
@@ -150,7 +161,7 @@ export class OfflineRenderer {
           // the frame extends beyond the tile: tile pixel (0,0) is image pixel (x0, y0)
           const frame: Rect = { x: -x0, y: -y0, w: W, h: H };
           for (let s = 0; s < passes; s++) {
-            if (preview) await this.previewPass(accum, tw, th, frame, basis, tanHalf, opts.signal);
+            if (preview) await this.previewPass(accum, s, tw, th, frame, basis, tanHalf, opts.signal);
             else await this.pathPass(accum, s, tw, th, frame, basis, tanHalf, opts.signal);
             done++;
             if (s % 4 === 0) progress();
@@ -202,6 +213,7 @@ export class OfflineRenderer {
 
   private async previewPass(
     rts: WebGLRenderTarget[],
+    sample: number,
     w: number,
     h: number,
     frame: Rect,
@@ -215,10 +227,19 @@ export class OfflineRenderer {
     const bounces = u.uMaxBounces.value;
     u.uMaxBounces.value = 14;
     e.setFrameUniforms(u, w, h, frame, basis, tanHalf);
+    const j = PREVIEW_AA[sample % PREVIEW_AA.length];
+    (u.uJitter.value as Vector2).set(j[0], j[1]);
+    u.uSample.value = sample;
+    u.uPrev.value = rts[0].texture;
     e.quad.material = e.previewMaterial;
-    e.renderer.setRenderTarget(rts[0]);
+    e.renderer.setRenderTarget(rts[1]);
     e.quad.render(e.renderer);
+    const t = rts[0];
+    rts[0] = rts[1];
+    rts[1] = t;
     u.uMaxBounces.value = bounces;
+    u.uSample.value = 0;
+    (u.uJitter.value as Vector2).set(0, 0);
     await gpuIdle(e.renderer.getContext() as WebGL2RenderingContext);
   }
 

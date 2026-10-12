@@ -185,7 +185,13 @@ export class Engine {
       glslVersion: GLSL3,
       vertexShader: fullscreenVertex,
       fragmentShader: buildTraceShader('preview'),
-      uniforms: { ...shared, uMaxBounces: { value: this.settings.previewBounces } },
+      uniforms: {
+        ...shared,
+        uMaxBounces: { value: this.settings.previewBounces },
+        uPrev: { value: null },
+        uSample: { value: 0 },
+        uJitter: { value: new Vector2() },
+      },
       depthTest: false,
       depthWrite: false,
     });
@@ -418,21 +424,6 @@ export class Engine {
     const p = this.controls.getPosition(new Vector3());
     const t = this.controls.getTarget(new Vector3());
     return { position: [p.x, p.y, p.z], target: [t.x, t.y, t.z], focalLength: this.activeCamera()?.focalLength ?? 70 };
-  }
-
-  /** Camera that fits the object into the frame, keeping the viewing direction. */
-  fitCamera(margin = 1.12): CameraDoc | null {
-    const s = this.glass.sweep;
-    const cam = this.activeCamera();
-    if (!s || !cam) return null;
-    const t = this.tanHalf();
-    const aspect = this.frameAspect();
-    const half = Math.atan(t * Math.min(1, aspect));
-    const dist = (s.boundingRadius * margin) / Math.sin(half);
-    const target = new Vector3(...s.center);
-    const dir = new Vector3(...cam.position).sub(new Vector3(...cam.target)).normalize();
-    const pos = target.clone().addScaledVector(dir, dist);
-    return { position: [pos.x, pos.y, pos.z], target: [target.x, target.y, target.z], focalLength: cam.focalLength };
   }
 
   sceneScale(): number {

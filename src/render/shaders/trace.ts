@@ -195,11 +195,17 @@ vec4 trace( vec3 ro, vec3 rd, vec2 uv ) {
 	return vec4( col + thr * envDispersed( ro, rd, sR, sB ), alpha );
 }
 
+uniform sampler2D uPrev;
+uniform int uSample;        // > 0: accumulate jittered passes (anti-aliasing for offline renders)
+uniform vec2 uJitter;
+
 out vec4 fragColor;
 void main() {
 	vec2 uv;
-	vec3 rd = cameraDir( gl_FragCoord.xy, uv );
-	fragColor = trace( uCamPos, rd, uv );
+	vec3 rd = cameraDir( gl_FragCoord.xy + uJitter, uv );
+	vec4 c = trace( uCamPos, rd, uv );
+	if ( uSample > 0 ) c = mix( texelFetch( uPrev, ivec2( gl_FragCoord.xy ), 0 ), c, 1.0 / float( uSample + 1 ) );
+	fragColor = c;
 }
 `;
 

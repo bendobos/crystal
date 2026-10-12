@@ -41,7 +41,7 @@ export function createDefaultDoc(): SceneDoc {
   const shape = shapePreset('infinity');
   const targets = [exportTarget('iphone-pro'), exportTarget('mac-5k')];
   // the desktop format gets its own framing so the object fills the landscape frame too
-  targets[1].camera = fitCamera(structuredClone(DEFAULT_CAMERA), shape, targets[1].width / targets[1].height, 1.15);
+  targets[1].camera = fitCamera(structuredClone(DEFAULT_CAMERA), shape, targets[1].width / targets[1].height, 1.5);
   return {
     version: 1,
     name: 'Unbenannt',
@@ -49,7 +49,7 @@ export function createDefaultDoc(): SceneDoc {
     glass: { ...DEFAULT_GLASS },
     lighting: { studioId: studio.id, ...structuredClone(studio.lighting) },
     background: structuredClone(studio.background),
-    camera: fitCamera(structuredClone(DEFAULT_CAMERA), shape, targets[0].width / targets[0].height, 1.02),
+    camera: fitCamera(structuredClone(DEFAULT_CAMERA), shape, targets[0].width / targets[0].height, 1.12),
     effects: { ...DEFAULT_EFFECTS },
     exportTargets: targets,
     activeTargetId: targets[0].id,

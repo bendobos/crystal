@@ -67,7 +67,7 @@ export function ExportPanel() {
               const t = exportTarget('uhd-4k', `t${Date.now().toString(36)}`);
               // new formats start with their own, fitted framing
               const d = useStore.getState().doc;
-              t.camera = fitCamera(structuredClone(d.camera), d.shape, t.width / t.height, 1.15);
+              t.camera = fitCamera(structuredClone(d.camera), d.shape, t.width / t.height, t.width > t.height ? 1.5 : 1.12);
               updateTargets((ts) => [...ts, t]);
               setDoc((d) => ({ ...d, activeTargetId: t.id }), { history: false });
             }}
