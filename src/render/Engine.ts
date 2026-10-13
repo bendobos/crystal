@@ -29,7 +29,7 @@ import CameraControls from 'camera-controls';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 import type { CameraDoc, ExportTargetDoc, SceneDoc } from '../model/types';
 import { GlassMesh, type SurfaceHit } from './GlassMesh';
-import { QUALITY_INTERACTIVE } from '../geometry/sweep';
+import { hasFillets, QUALITY_DRAG, QUALITY_INTERACTIVE } from '../geometry/sweep';
 import { buildTraceShader, fullscreenVertex } from './shaders/trace';
 import { bloomDownFragment, bloomUpFragment, compositeFragment } from './shaders/composite';
 import {
@@ -760,13 +760,16 @@ export class Engine {
   private updateGeometry(): void {
     if (!this.doc) return;
     const t0 = performance.now();
-    this.glass.update(this.doc.shape, QUALITY_INTERACTIVE, true);
+    // fillets between thorns and tube take too long for every drag step: they follow on settle
+    this.blendPending = hasFillets(this.doc.shape, QUALITY_INTERACTIVE);
+    this.glass.update(this.doc.shape, this.blendPending ? QUALITY_DRAG : QUALITY_INTERACTIVE, true);
     applyGlass(this.mat, this.doc.glass, this.sceneScale());
     this.pendingShape = false;
     this.geometryMs = performance.now() - t0;
   }
 
   geometryMs = 0;
+  private blendPending = false;
 
   private frame = (now: number): void => {
     this.raf = 0;
@@ -813,6 +816,14 @@ export class Engine {
 
   private settle = (): void => {
     if (!this.canPump()) return;
+    if (this.blendPending && this.doc) {
+      // add the fillets, show them and settle again
+      this.blendPending = false;
+      this.glass.update(this.doc.shape, QUALITY_INTERACTIVE, false);
+      this.glass.rebuild();
+      this.invalidate();
+      return;
+    }
     if (this.glass.degraded) this.glass.rebuild();
     if (!this.refined()) this.startPump();
   };

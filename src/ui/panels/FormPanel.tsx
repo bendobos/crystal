@@ -85,6 +85,15 @@ export function FormPanel() {
       {!!shape.branches?.length && (
         <Section title="Dornen">
           <p className="hint">Die Dornen wachsen aus der Röhre und wandern mit, wenn du die Form bearbeitest.</p>
+          <Slider
+            label="Verschmelzen"
+            value={shape.blend ?? 1}
+            min={0}
+            max={1.2}
+            step={0.01}
+            format={(v) => (v < 0.01 ? 'aus' : `${Math.round(v * 100)} %`)}
+            onChange={(blend) => up({ blend })}
+          />
           <Button onClick={() => up({ branches: undefined })}>Dornen entfernen</Button>
         </Section>
       )}

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { ArcSpline } from '../src/geometry/spline';
 import { computeFrames, createFrames } from '../src/geometry/frames';
-import { sweepShape, topologyKeyFor, effectiveShape, type SweepQuality } from '../src/geometry/sweep';
+import { sweepShape, topologyKeyFor, effectiveShape, QUALITY_INTERACTIVE, type SweepQuality } from '../src/geometry/sweep';
+import { shapePreset } from '../src/model/presets/shapes';
 import { createDetail } from '../src/geometry/fields';
 import type { ShapeDoc, Vec3 } from '../src/model/types';
 
@@ -182,6 +183,42 @@ describe('sweep', () => {
     }
     expect(best).toBeLessThan(0.15);
     expect(topologyKeyFor(s, Q)).not.toBe(topologyKeyFor({ ...s, branches: [] }, Q));
+  });
+
+  it('fuses thorns into the tube as one closed, unfolded mesh', () => {
+    const res = sweepShape(shapePreset('neo-tribal'), QUALITY_INTERACTIVE);
+    expect(res.topologyKey).toContain('fused');
+    // closed and consistently oriented: every directed edge has exactly one reverse twin
+    const edges = new Map<string, number>();
+    for (let i = 0; i < res.index.length; i += 3) {
+      for (let e = 0; e < 3; e++) {
+        const k = `${res.index[i + e]}-${res.index[i + ((e + 1) % 3)]}`;
+        edges.set(k, (edges.get(k) ?? 0) + 1);
+      }
+    }
+    for (const [k, count] of edges) {
+      const [a, b] = k.split('-');
+      expect(count).toBe(edges.get(`${b}-${a}`));
+    }
+    // (almost) no triangle faces against its vertex normals
+    const P = res.positions, N = res.normals, I = res.index;
+    let folded = 0;
+    for (let i = 0; i < I.length; i += 3) {
+      const [a, b, c] = [I[i] * 3, I[i + 1] * 3, I[i + 2] * 3];
+      const e1 = [P[b] - P[a], P[b + 1] - P[a + 1], P[b + 2] - P[a + 2]];
+      const e2 = [P[c] - P[a], P[c + 1] - P[a + 1], P[c + 2] - P[a + 2]];
+      const n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+      let d = 0;
+      for (const v of [a, b, c]) d += n[0] * N[v] + n[1] * N[v + 1] + n[2] * N[v + 2];
+      if (d < 0) folded++;
+    }
+    expect(folded / (I.length / 3)).toBeLessThan(5e-4);
+  });
+
+  it('leaves multi-strand tubes and blend 0 unfused', () => {
+    const s = shapePreset('neo-tribal');
+    expect(sweepShape({ ...s, strands: 2 }, QUALITY_INTERACTIVE).topologyKey).not.toContain('fused');
+    expect(sweepShape({ ...s, blend: 0 }, QUALITY_INTERACTIVE).topologyKey).not.toContain('fused');
   });
 
   it('keeps topology when only continuous parameters change (refit-safe)', () => {

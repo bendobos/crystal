@@ -7,7 +7,7 @@ import { getEngine } from '../render/engineRef';
 import { OfflineRenderer } from './OfflineRenderer';
 import type { ExportProgress } from './jobs';
 
-const VIDEO_GEOMETRY = { rings: 720, segments: 48, capRings: 8 };
+const VIDEO_GEOMETRY = { rings: 720, segments: 48, capRings: 8, fillets: true };
 const PHOTO_SAMPLES = 40;
 
 export async function exportVideo(

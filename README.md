@@ -14,7 +14,7 @@ npm run build      # Typecheck + Produktions-Build inkl. Service Worker
 | Bereich | Dateien | Kurz |
 |---|---|---|
 | Szenen-Dokument | `src/model/` | `SceneDoc` (reine Daten), Zustand-Store mit eigener Undo-Historie, Vorlagen, Teilen-Link (`serialize.ts`, Zod-validiert), Projekte in IndexedDB |
-| Geometrie | `src/geometry/` | Zentripetale Catmull-Rom-Kurve nach Bogenlänge, rotationsminimierende Rahmen mit Holonomie-Korrektur, Sweep mit Strängen/Verdrehung/Endkappen, spitzen Enden und Dornen (Nebenröhren, die der Tracer mit der Hauptröhre verschmilzt), Feinform-Felder für den Pinsel, Freihand-Strich → Kurve (Kreuzungen über/unter) |
+| Geometrie | `src/geometry/` | Zentripetale Catmull-Rom-Kurve nach Bogenlänge, rotationsminimierende Rahmen mit Holonomie-Korrektur, Sweep mit Strängen/Verdrehung/Endkappen, spitzen Enden und Dornen (Nebenröhren, mit Kehlen zu einem Mesh verschweißt, `blend.ts`), Feinform-Felder für den Pinsel, Freihand-Strich → Kurve (Kreuzungen über/unter) |
 | Rendering | `src/render/` | Eigener Glas-Raytracer in WebGL2 auf `three-mesh-bvh`: deterministische Live-Vorschau (`MODE preview`) und progressiver spektraler Pathtracer (`path`); Studio-Umgebung aus analytischen Lichtkarten, Kuppel und endlichem Hintergrundkarton; AgX/Neutral-Tonemapping, Bloom, Vignette, Korn |
 | Interaktion | `src/interaction/` | Kontrollpunkte, Glasbläser-Pinsel, Freihand, Lichtkugel und „Glanzlicht hierhin“ |
 | Export | `src/export/` | Kachel-Renderer mit GPU-Fences (UI bleibt flüssig), PNG/JPEG in sRGB oder Display P3, Format-Sets als ZIP/Teilen-Dialog, MP4/WebM-Loops über WebCodecs + Mediabunny |
@@ -23,6 +23,7 @@ npm run build      # Typecheck + Produktions-Build inkl. Service Worker
 ### Wichtige Entscheidungen
 
 - **WYSIWYG:** Vorschau und Export teilen dieselben Shader-Bausteine. Die Vorschau folgt dem dominanten Lichtpfad (rauschfrei); der Pathtracer verzweigt stochastisch (Fresnel, mit Importance-Mix und stratifizierten ersten Entscheidungen) und tastet Wellenlängen spektral ab.
+- **Dornen aus einem Guss (`geometry/blend.ts`):** Hauptröhre und Dornen werden getrennt gesweept (nadelscharfe Spitzen). An jeder Austrittsstelle werden beide Meshes entlang ihrer Schnittlinie geschnitten. Punkte in Kehlnähe wandern auf die weiche Vereinigung beider Röhren (Kehlgröße höchstens so dick wie der dünnere Teil). Die Schnittränder werden verschweißt und Faltungen entwirrt. Ergebnis: ein geschlossenes Mesh ohne Innenflächen. Das kostet ≈ 0,25 s und läuft erst, wenn die Ansicht ruht; beim Ziehen überlappen die Röhren nur.
 - **Feste Mesh-Topologie** pro Qualitätsstufe: Beim Ziehen wird die BVH nur „refittet“; nach dem Loslassen folgt ein SAH-Neuaufbau.
 - **Hintergrundfarben sind exakt:** Die HDR-Radianz des Hintergrunds wird über die Umkehrung der Display-Transformation bestimmt (`render/color.ts` spiegelt den Composite-Shader).
 - **Vorschau in Stufen:** Beim Ziehen rendert der deterministische Tracer mit adaptiver Auflösung. Sobald die Ansicht ruht, folgen 6 gejitterte Durchgänge in nativer Auflösung (scharf, rauschfrei, nach Sekundenbruchteilen). Danach läuft der Pathtracer nur im Bildbereich, der Glas sehen kann (projizierte Bounding-Box ∩ Rahmen), und wird ab 16 Samples überblendet.

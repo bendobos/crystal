@@ -2,6 +2,7 @@ import type { BranchDoc, ShapeDoc, Vec3 } from '../model/types';
 import { ArcSpline } from './spline';
 import { computeFrames, createFrames, type Frames } from './frames';
 import { isDetailEmpty, sampleScalar, sampleVec3 } from './fields';
+import { fuseBranches, type Tube } from './blend';
 
 export interface SweepQuality {
   /** Rings along the curve (per strand). */
@@ -10,10 +11,14 @@ export interface SweepQuality {
   segments: number;
   /** Rings in each rounded end cap of open curves. */
   capRings: number;
+  /** Fuse thorns into the tube with fillets (otherwise they just overlap it). */
+  fillets?: boolean;
 }
 
-export const QUALITY_INTERACTIVE: SweepQuality = { rings: 480, segments: 40, capRings: 6 };
-export const QUALITY_EXPORT: SweepQuality = { rings: 1200, segments: 72, capRings: 10 };
+export const QUALITY_INTERACTIVE: SweepQuality = { rings: 480, segments: 40, capRings: 6, fillets: true };
+/** Interactive quality without fillets, for drag steps. */
+export const QUALITY_DRAG: SweepQuality = { ...QUALITY_INTERACTIVE, fillets: false };
+export const QUALITY_EXPORT: SweepQuality = { rings: 1200, segments: 72, capRings: 10, fillets: true };
 
 export interface SweepResult {
   topologyKey: string;
@@ -73,6 +78,11 @@ export function topologyKeyFor(shape: ShapeDoc, q: SweepQuality): string {
   return [q.rings, q.segments, q.capRings, e.strands, e.closed ? 1 : 0, e.shift, e.strandShift, activeBranches(shape).length].join('|');
 }
 
+/** Whether sweeping `shape` at quality `q` fuses its thorns into the tube (single strand only). */
+export function hasFillets(shape: ShapeDoc, q: SweepQuality): boolean {
+  return !!q.fillets && (shape.blend ?? 1) > 0 && Math.round(shape.strands) <= 1 && activeBranches(shape).length > 0;
+}
+
 /** Rings along each branch (fixed per quality, independent of the branch length). */
 export function branchRings(q: SweepQuality): number {
   return Math.max(16, Math.round(q.rings / 6));
@@ -127,15 +137,11 @@ export function sweepShape(shape: ShapeDoc, q: SweepQuality, reuse?: SweepResult
   const NB = branchRings(q);
   const vertsPerBranch = (NB + 2 * q.capRings) * M + 2;
   const mainVerts = vertsPerStrand * S;
-  const vertexCount = mainVerts + branches.length * vertsPerBranch;
-  const key = topologyKeyFor(shape, q);
-
-  const reuseOk = reuse && reuse.topologyKey === key;
-  const positions = reuseOk ? reuse.positions : new Float32Array(vertexCount * 3);
-  const normals = reuseOk ? reuse.normals : new Float32Array(vertexCount * 3);
-  const tparam = reuseOk ? reuse.tparam : new Float32Array(vertexCount);
-  const strandAttr = reuseOk ? reuse.strand : new Uint8Array(vertexCount);
-  const index = reuseOk ? reuse.index : buildIndex(eff, q, branches.length);
+  const blend = Math.max(0, shape.blend ?? 1);
+  // fillet meshes change their vertex count with every edit, so they never reuse buffers
+  const blending = hasFillets(shape, q);
+  const baseKey = topologyKeyFor(shape, q);
+  const reuseOk = !blending && reuse && reuse.topologyKey === baseKey;
 
   // --- centre line -------------------------------------------------------------------------
   const spline = new ArcSpline(shape.points, closed, Math.max(32, Math.ceil((N * 2) / shape.points.length)));
@@ -183,6 +189,64 @@ export function sweepShape(shape: ShapeDoc, q: SweepQuality, reuse?: SweepResult
   const taper = shape.taper ?? 0;
   /** Radius factor of the main tube at t: brush detail and tapered ends. */
   const radiusScale = (t: number) => (detail ? Math.exp(sampleScalar(detail.radius, t, closed)) : 1) * taperAt(t, taper, closed);
+
+  // --- branches: centre lines, frames and radii ----------------------------------------------
+  const branchTubes: Tube[] = branches.map((b) => {
+    const t0 = Math.min(Math.max(b.t, 0), 1);
+    // anchor on the deformed centre line
+    const rf = closed ? t0 * N : t0 * (N - 1);
+    const r0 = Math.min(Math.floor(rf), N - 1);
+    const r1 = closed ? (r0 + 1) % N : Math.min(r0 + 1, N - 1);
+    const f = rf - Math.floor(rf);
+    const anchor: Vec3 = [0, 1, 2].map((c) => centers[r0 * 3 + c] * (1 - f) + centers[r1 * 3 + c] * f) as Vec3;
+    const pts: Vec3[] = [anchor, ...b.points.map((o) => [anchor[0] + o[0], anchor[1] + o[1], anchor[2] + o[2]] as Vec3)];
+    const bs = new ArcSpline(pts, false, Math.max(32, Math.ceil((NB * 2) / pts.length)));
+    const bc = new Float64Array(NB * 3);
+    for (let i = 0; i < NB; i++) {
+      bs.pointAt(i / (NB - 1), tmp);
+      bc[i * 3] = tmp[0];
+      bc[i * 3 + 1] = tmp[1];
+      bc[i * 3 + 2] = tmp[2];
+    }
+    // the branch profile lies flat in the same plane as the main profile at the anchor
+    const rn = Math.round(rf) % N;
+    const tw = twistTotal * t0 + (detail ? sampleScalar(detail.twist, t0, closed) : 0) + (shape.phase ?? 0);
+    const thin = [0, 1, 2].map((c) => -Math.sin(tw) * FN[rn * 3 + c] + Math.cos(tw) * FB[rn * 3 + c]);
+    const dx = bc[3] - bc[0], dy = bc[4] - bc[1], dz = bc[5] - bc[2];
+    const bFrames = createFrames(NB);
+    computeFrames(bc, NB, false, bFrames, [thin[1] * dz - thin[2] * dy, thin[2] * dx - thin[0] * dz, thin[0] * dy - thin[1] * dx]);
+    // thorn profile: full width at the anchor, narrowing to a point
+    const a = new Float64Array(NB);
+    for (let i = 0; i < NB; i++) a[i] = R * b.width * tipShape(1 - i / (NB - 1));
+    return { n: NB, closed: false, c: bc, w: bFrames.normal, h: bFrames.binormal, t: bFrames.tangent, a };
+  });
+
+  /** The main tube as distance-field input, with the twisted profile axes (single strand). */
+  function mainTube(): Tube {
+    const c = centers, w = new Float64Array(N * 3), h = new Float64Array(N * 3);
+    const a = new Float64Array(N);
+    for (let r = 0; r < N; r++) {
+      const t = ringT(r);
+      const tw = twistTotal * t + (detail ? sampleScalar(detail.twist, t, closed) : 0) + (shape.phase ?? 0);
+      const cw = Math.cos(tw), sw = Math.sin(tw);
+      for (let k = 0; k < 3; k++) {
+        const n = FN[r * 3 + k], b = FB[r * 3 + k];
+        w[r * 3 + k] = cw * n + sw * b;
+        h[r * 3 + k] = -sw * n + cw * b;
+      }
+      a[r] = R * radiusScale(t);
+    }
+    return { n: N, closed, c, w, h, t: FT, a };
+  }
+
+  // --- buffers ---------------------------------------------------------------------------------
+  const tubeVerts = mainVerts + branches.length * vertsPerBranch;
+  let positions = reuseOk ? reuse.positions : new Float32Array(tubeVerts * 3);
+  let normals = reuseOk ? reuse.normals : new Float32Array(tubeVerts * 3);
+  let tparam = reuseOk ? reuse.tparam : new Float32Array(tubeVerts);
+  let strandAttr = reuseOk ? reuse.strand : new Uint8Array(tubeVerts);
+  let index = reuseOk ? reuse.index : buildIndex(eff, q, branches.length);
+  let key = baseKey;
 
   const writeRing = (
     s: number,
@@ -257,46 +321,14 @@ export function sweepShape(shape: ShapeDoc, q: SweepQuality, reuse?: SweepResult
     }
   }
 
-  // --- branches ------------------------------------------------------------------------------
+  // --- branch rings ---------------------------------------------------------------------------
   const KB = q.capRings;
   const QB = NB + 2 * KB;
-  const bc = new Float64Array(NB * 3);
-  const bFrames = createFrames(NB);
-  const bRadius = new Float64Array(NB);
-  branches.forEach((b, bi) => {
-    const t0 = Math.min(Math.max(b.t, 0), 1);
-    // anchor on the deformed centre line
-    const rf = closed ? t0 * N : t0 * (N - 1);
-    const r0 = Math.min(Math.floor(rf), N - 1);
-    const r1 = closed ? (r0 + 1) % N : Math.min(r0 + 1, N - 1);
-    const f = rf - Math.floor(rf);
-    const anchor: Vec3 = [0, 1, 2].map((c) => centers[r0 * 3 + c] * (1 - f) + centers[r1 * 3 + c] * f) as Vec3;
-    const pts: Vec3[] = [anchor, ...b.points.map((o) => [anchor[0] + o[0], anchor[1] + o[1], anchor[2] + o[2]] as Vec3)];
-    const bs = new ArcSpline(pts, false, Math.max(32, Math.ceil((NB * 2) / pts.length)));
-    for (let i = 0; i < NB; i++) {
-      bs.pointAt(i / (NB - 1), tmp);
-      bc[i * 3] = tmp[0];
-      bc[i * 3 + 1] = tmp[1];
-      bc[i * 3 + 2] = tmp[2];
-    }
-    // the branch profile lies flat in the same plane as the main profile at the anchor
-    const rn = Math.round(rf) % N;
-    const tw = twistTotal * t0 + (detail ? sampleScalar(detail.twist, t0, closed) : 0) + (shape.phase ?? 0);
-    const thin = [0, 1, 2].map((c) => -Math.sin(tw) * FN[rn * 3 + c] + Math.cos(tw) * FB[rn * 3 + c]);
-    const dx = bc[3] - bc[0], dy = bc[4] - bc[1], dz = bc[5] - bc[2];
-    computeFrames(bc, NB, false, bFrames, [thin[1] * dz - thin[2] * dy, thin[2] * dx - thin[0] * dz, thin[0] * dy - thin[1] * dx]);
-
-    // thorn profile: flares where it leaves the main tube (a soft fillet), then narrows to a point
-    const exit = R * radiusScale(t0);
-    for (let i = 0; i < NB; i++) {
-      const u = i / (NB - 1);
-      const sAlong = u * bs.length;
-      const flare = 1 + 0.6 * Math.exp(-(((sAlong - exit) / (0.9 * exit)) ** 2));
-      bRadius[i] = R * b.width * tipShape(1 - u) * flare;
-    }
-
+  branchTubes.forEach((bt, bi) => {
+    const t0 = Math.min(Math.max(branches[bi].t, 0), 1);
+    const bc = bt.c, bRadius = bt.a;
     const v0 = mainVerts + bi * vertsPerBranch;
-    const BN = bFrames.normal, BB = bFrames.binormal, BT = bFrames.tangent;
+    const BN = bt.w, BB = bt.h, BT = bt.t;
     const writeBranchRing = (seq: number, i: number, scale: number, along: number) => {
       const k = bRadius[i] * scale;
       const capLen = along * bRadius[i] * Math.max(aspect, 0.3);
@@ -330,12 +362,39 @@ export function sweepShape(shape: ShapeDoc, q: SweepQuality, reuse?: SweepResult
     }
   });
 
+  // --- fuse thorns into the tube --------------------------------------------------------------
+  let smoothed: { v: Uint32Array; n: Float32Array } | null = null;
+  if (blending) {
+    const fused = fuseBranches({
+      positions,
+      index,
+      tparam,
+      strand: strandAttr,
+      branchRanges: branches.map((_, bi) => [mainVerts + bi * vertsPerBranch, mainVerts + (bi + 1) * vertsPerBranch]),
+      main: mainTube(),
+      branches: branchTubes,
+      profile: { aspect, exponent: 2 + Math.max(0, Math.min(1, shape.roundness)) * 6 },
+      k: blend * R,
+    });
+    if (fused) {
+      ({ positions, index, tparam } = fused);
+      strandAttr = fused.strand;
+      normals = new Float32Array(positions.length);
+      smoothed = { v: fused.smoothed, n: fused.smoothedNormals };
+      key = `${baseKey}|fused${positions.length / 3}/${index.length / 3}`;
+    }
+  }
+
   computeNormals(positions, index, normals);
+  // fillet vertices carry exact normals of the smooth union
+  if (smoothed) {
+    for (let i = 0; i < smoothed.v.length; i++) normals.set(smoothed.n.subarray(i * 3, i * 3 + 3), smoothed.v[i] * 3);
+  }
 
   // --- bounds --------------------------------------------------------------------------------
   let minX = Infinity, minY = Infinity, minZ = Infinity;
   let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-  for (let i = 0; i < vertexCount; i++) {
+  for (let i = 0; i < positions.length / 3; i++) {
     const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
     if (x < minX) minX = x;
     if (y < minY) minY = y;

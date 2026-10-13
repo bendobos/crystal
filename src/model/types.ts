@@ -48,6 +48,8 @@ export interface ShapeDoc {
   taper?: number;
   /** Thorns that branch off the main tube; they follow its anchor point when it moves. */
   branches?: BranchDoc[];
+  /** Fillet size where thorns meet the tube, in multiples of the radius (default 1). */
+  blend?: number;
   /** Animation offsets (not edited directly): profile rotation and strand rotation in radians. */
   phase?: number;
   strandPhase?: number;
