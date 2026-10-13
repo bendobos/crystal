@@ -54,6 +54,7 @@ import {
   type Rect,
 } from './view';
 import { BloomChain } from './Bloom';
+import { Denoiser } from './denoise';
 import { detectTier, TIER_SETTINGS, type QualityTier, type TierSettings } from './quality';
 import {
   CHECK_INTERVAL,
@@ -159,6 +160,12 @@ export class Engine {
   private lastRefineComposite = 0;
   private pacer: GpuPacer;
   readonly bloom = new BloomChain();
+  /** Denoises the refined image like exports do (same setting, so the preview matches). */
+  private denoiser: Denoiser | null = null;
+  private denoise = true;
+  private refineGen = 0;
+  private denoisedKey = '';
+  private denoisedTex: Texture | null = null;
   private bloomTex: Texture | null = null;
   private lut: DataTexture | null = null;
   private raf = 0;
@@ -456,6 +463,12 @@ export class Engine {
     this.controls.touches.three = A.TOUCH_TRUCK;
   }
 
+  setDenoise(on: boolean): void {
+    if (this.denoise === on) return;
+    this.denoise = on;
+    this.requestRender(true);
+  }
+
   setQuality(tier: QualityTier): void {
     this.tier = tier;
     this.settings = TIER_SETTINGS[tier];
@@ -602,6 +615,7 @@ export class Engine {
     this.pacer.drop();
     for (const rt of [this.previewA, this.previewB, this.accumA, this.accumB, this.maskA, this.maskB]) rt.dispose();
     this.convergenceMaterial.dispose();
+    this.denoiser?.dispose();
     this.bloom.dispose();
     this.renderer.dispose();
   }
@@ -956,6 +970,7 @@ export class Engine {
     }
     rect = rect && intersectRect(rect, surface);
     this.refineRect = rect;
+    this.refineGen++;
     this.samples = 0;
     this.rowCursor = 0;
     this.maskPending = false;
@@ -1054,6 +1069,21 @@ export class Engine {
     this.activeBlocks = countActive(this.maskPixels);
   }
 
+  /** The refined image to show: the accumulator, denoised with the sharp preview as guide. */
+  private refinedTexture(): Texture {
+    const r = this.refineRect;
+    if (!this.denoise || !r || this.samples === 0) return this.accumA.texture;
+    const key = `${this.refineGen}:${this.samples}`;
+    if (key !== this.denoisedKey || !this.denoisedTex) {
+      this.denoiser ??= new Denoiser(this.floatType);
+      // the sharp preview covers the canvas at native resolution once refinement runs
+      const guide: [number, number, number, number] = [r.x, this.canvas.height - r.y - r.h, r.w, r.h];
+      this.denoisedTex = this.denoiser.run(this.renderer, this.quad, this.accumA.texture, this.samples, this.shown.rt.texture, guide);
+      this.denoisedKey = key;
+    }
+    return this.denoisedTex;
+  }
+
   private mixAccum(): number {
     if (!this.refineRect) return 0;
     if (this.refineState === 'done' && this.samples > 0) return 1;
@@ -1086,7 +1116,7 @@ export class Engine {
       {
         a: s.rt.texture,
         aScale: [s.w / s.rt.width, s.h / s.rt.height],
-        b: mix > 0 ? this.accumA.texture : null,
+        b: mix > 0 ? this.refinedTexture() : null,
         bRect: [rx / W, ry / H, rw / W, rh / H],
         mix,
       },
@@ -1107,7 +1137,7 @@ export class Engine {
     const ph = s.rt.height;
     (c.uPreviewTransform.value as Vector4).set(s.w / pw, s.h / ph, 0, 0);
     (c.uPreviewMax.value as Vector2).set((s.w - 0.5) / pw, (s.h - 0.5) / ph);
-    c.uAccum.value = this.accumA.texture;
+    c.uAccum.value = this.mixAccum() > 0 ? this.refinedTexture() : this.accumA.texture;
     (c.uAccumRect.value as Vector4).set(...this.accumRectGL());
     c.uMixAccum.value = this.mixAccum();
     c.uBloom.value = this.bloomTex ?? this.blackTexture;
