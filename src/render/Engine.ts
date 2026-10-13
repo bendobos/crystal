@@ -1,5 +1,6 @@
 import {
   Clock,
+  Color,
   DataTexture,
   FloatType,
   GLSL3,
@@ -53,17 +54,29 @@ import {
   type Rect,
 } from './view';
 import { BloomChain } from './Bloom';
-import { yieldTask } from '../util/yield';
 import { detectTier, TIER_SETTINGS, type QualityTier, type TierSettings } from './quality';
+import {
+  CHECK_INTERVAL,
+  convergenceFragment,
+  countActive,
+  GpuPacer,
+  intersectRect,
+  makeMaskRT,
+  maskSize,
+  PREVIEW_AA,
+  projectedRect,
+} from './adaptive';
 
 CameraControls.install({
   THREE: { Vector2, Vector3: V3, Vector4, Quaternion, Matrix4, Spherical, Box3, Sphere, Raycaster },
 });
 
 export interface RenderStatus {
-  mode: 'preview' | 'refine' | 'done' | 'paused';
+  mode: 'preview' | 'sharp' | 'refine' | 'done' | 'paused';
   samples: number;
   target: number;
+  /** Refinement progress 0..1 (converged blocks stop early). */
+  progress: number;
   previewScale: number;
   fps: number;
   tier: QualityTier;
@@ -78,6 +91,13 @@ export interface EngineEvents {
 }
 
 const SETTLE_MS = 160;
+/** Path samples before the refined image starts to replace the sharp preview, and when it has. */
+const MIX_START = 16;
+const MIX_END = 32;
+/** Bounces of the deterministic tracer for the settled (sharp) preview. */
+const SHARP_BOUNCES = 12;
+/** Minimum time between composites while refining. */
+const REFINE_COMPOSITE_MS = 150;
 const FALLBACK_CAMERA: CameraDoc = { position: [0, 0, 12], target: [0, 0, 0], focalLength: 70 };
 
 export type Uniforms = Record<string, IUniform>;
@@ -96,6 +116,7 @@ export class Engine {
   readonly compositeMaterial: RawShaderMaterial;
   readonly bloomDown: RawShaderMaterial;
   readonly bloomUp: RawShaderMaterial;
+  readonly convergenceMaterial: RawShaderMaterial;
   readonly floatType: typeof FloatType | typeof HalfFloatType;
   readonly displaySpace: OutputSpace;
   readonly blackTexture: DataTexture;
@@ -112,9 +133,31 @@ export class Engine {
   private dpr = 1;
   private frameCss: Rect = { x: 0, y: 0, w: 1, h: 1 };
   private frameArea: Rect | null = null;
-  private previewRT: WebGLRenderTarget;
+  /**
+   * Preview targets at native canvas resolution. The live preview uses the lower-left part of
+   * previewA; the settled preview accumulates jittered passes in both (ping-pong).
+   */
+  private previewA: WebGLRenderTarget;
+  private previewB: WebGLRenderTarget;
+  /** The preview shown: target and the part of it in use. */
+  private shown: { rt: WebGLRenderTarget; w: number; h: number };
+  /** Completed anti-aliasing passes of the settled preview, and the next row of the current one. */
+  private sharpPass = 0;
+  private sharpCursor = 0;
+  /** Path tracing accumulators, covering only `refineRect` (native canvas pixels, top-left origin). */
   private accumA: WebGLRenderTarget;
   private accumB: WebGLRenderTarget;
+  private maskA: WebGLRenderTarget;
+  private maskB: WebGLRenderTarget;
+  private maskPixels = new Uint8Array(4);
+  private refineState: 'none' | 'running' | 'done' = 'none';
+  private refineRect: Rect | null = null;
+  private refineFrame: Rect = { x: 0, y: 0, w: 1, h: 1 };
+  private totalBlocks = 0;
+  private activeBlocks = 0;
+  private maskPending = false;
+  private lastRefineComposite = 0;
+  private pacer: GpuPacer;
   readonly bloom = new BloomChain();
   private bloomTex: Texture | null = null;
   private lut: DataTexture | null = null;
@@ -122,10 +165,7 @@ export class Engine {
   private clock = new Clock();
   private needsPreview = true;
   private samples = 0;
-  /** Rows of the refinement target traced per frame (adapted to keep frames short). */
-  private rowsPerFrame = 64;
   private rowCursor = 0;
-  private lastBandRows = 0;
   private lastChange = 0;
   private lastFrame = 0;
   private frameEma = 16;
@@ -208,6 +248,8 @@ export class Engine {
         uFocusDist: { value: 10 },
         uMaxBounces: { value: 24 },
         uBranchMix: { value: 0.35 },
+        uActive: { value: null },
+        uUseMask: { value: 0 },
       },
       depthTest: false,
       depthWrite: false,
@@ -221,6 +263,8 @@ export class Engine {
         uAccum: { value: null },
         uBloom: { value: this.blackTexture },
         uBloomTransform: { value: new Vector4(1, 1, 0, 0) },
+        uPreviewTransform: { value: new Vector4(1, 1, 1, 1) },
+        uAccumRect: { value: new Vector4(0, 0, 1, 1) },
         uMixAccum: { value: 0 },
         uBloomStrength: { value: 0 },
         uExposure: { value: 1 },
@@ -244,7 +288,9 @@ export class Engine {
       fragmentShader: bloomDownFragment,
       uniforms: {
         uSrc: { value: null },
+        uSrcScale: { value: new Vector2(1, 1) },
         uSrc2: { value: null },
+        uSrc2Rect: { value: new Vector4(0, 0, 1, 1) },
         uMix2: { value: -1 },
         uTexel: { value: new Vector2() },
         uThreshold: { value: 1 },
@@ -262,9 +308,30 @@ export class Engine {
       depthWrite: false,
     });
 
-    this.previewRT = this.makeRT(1, 1, HalfFloatType, LinearFilter);
+    this.convergenceMaterial = new RawShaderMaterial({
+      glslVersion: GLSL3,
+      vertexShader: fullscreenVertex,
+      fragmentShader: convergenceFragment,
+      uniforms: {
+        uAccum: { value: null },
+        uMaskPrev: { value: null },
+        uSamples: { value: 1 },
+        uTol: { value: 1 },
+        uExposure: { value: 1 },
+        uToneMapping: { value: 0 },
+      },
+      depthTest: false,
+      depthWrite: false,
+    });
+
+    this.previewA = this.makeRT(1, 1, HalfFloatType, LinearFilter);
+    this.previewB = this.makeRT(1, 1, HalfFloatType, LinearFilter);
+    this.shown = { rt: this.previewA, w: 1, h: 1 };
     this.accumA = this.makeRT(1, 1, this.floatType, NearestFilter);
     this.accumB = this.makeRT(1, 1, this.floatType, NearestFilter);
+    this.maskA = makeMaskRT(1, 1);
+    this.maskB = makeMaskRT(1, 1);
+    this.pacer = new GpuPacer(gl as WebGL2RenderingContext, { targetMs: 8, budget: this.settings.gpuBudget, inFlight: 1 });
 
     this.controls = new CameraControls(this.camera, canvas);
     this.controls.smoothTime = 0.12;
@@ -294,6 +361,7 @@ export class Engine {
     window.addEventListener('pointercancel', this.onAnyPointerUp, true);
     canvas.addEventListener('webglcontextlost', this.onContextLost);
     canvas.addEventListener('webglcontextrestored', this.onContextRestored);
+    document.addEventListener('visibilitychange', this.onVisibility);
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(canvas);
     this.resize();
@@ -392,6 +460,7 @@ export class Engine {
     this.settings = TIER_SETTINGS[tier];
     this.previewScale = Math.min(this.previewScale, this.settings.previewScaleMax);
     this.previewMaterial.uniforms.uMaxBounces.value = this.settings.previewBounces;
+    this.pacer.setBudget(this.settings.gpuBudget);
     this.resize();
     this.invalidate();
   }
@@ -434,6 +503,10 @@ export class Engine {
     this.needsPreview = true;
     this.samples = 0;
     this.rowCursor = 0;
+    this.sharpPass = 0;
+    this.sharpCursor = 0;
+    this.refineState = 'none';
+    this.maskPending = false;
     this.lastChange = performance.now();
     this.requestRender();
   }
@@ -472,7 +545,10 @@ export class Engine {
     return new Promise((resolve) => c.toBlob((b) => resolve(b), 'image/jpeg', 0.85));
   }
 
-  /** Measures GPU time per pass (ms per megapixel), forcing completion with a pixel read. */
+  /**
+   * Measures GPU time per pass (ms per megapixel), forcing completion with a pixel read: the
+   * settled preview at native resolution and path tracing over the glass region.
+   */
   benchmark(passes = 4): { previewMsPerMP: number; pathMsPerMP: number } {
     const gl = this.renderer.getContext();
     const px = new Uint8Array(4);
@@ -489,18 +565,25 @@ export class Engine {
     };
     const wasSuspended = this.suspended;
     this.suspended = true;
-    const rows = this.rowsPerFrame;
-    this.rowsPerFrame = 1e6;
-    const prev = time(() => this.renderPreview());
-    const path = time(() => {
-      this.rowCursor = 0;
-      this.renderSampleBand();
+    const prev = time(() => {
+      this.sharpPass = 0;
+      this.sharpCursor = 0;
+      this.renderSharpRows(this.canvas.height);
     });
-    this.rowsPerFrame = rows;
+    this.beginRefine();
+    const path = this.refineRect
+      ? time(() => {
+          this.rowCursor = 0;
+          this.renderPathRows(this.accumB.height);
+        })
+      : NaN;
     this.suspended = wasSuspended;
     this.invalidate();
-    const mp = (rt: WebGLRenderTarget) => (rt.width * rt.height) / 1e6;
-    return { previewMsPerMP: prev / mp(this.previewRT), pathMsPerMP: path / mp(this.accumA) };
+    const mp = (w: number, h: number) => (w * h) / 1e6;
+    return {
+      previewMsPerMP: prev / mp(this.canvas.width, this.canvas.height),
+      pathMsPerMP: path / mp(this.accumA.width, this.accumA.height),
+    };
   }
 
   dispose(): void {
@@ -510,10 +593,14 @@ export class Engine {
     this.controls.dispose();
     window.removeEventListener('pointerup', this.onAnyPointerUp, true);
     window.removeEventListener('pointercancel', this.onAnyPointerUp, true);
+    document.removeEventListener('visibilitychange', this.onVisibility);
     this.canvas.removeEventListener('webglcontextlost', this.onContextLost);
     this.canvas.removeEventListener('webglcontextrestored', this.onContextRestored);
     this.glass.dispose();
-    for (const rt of [this.previewRT, this.accumA, this.accumB]) rt.dispose();
+    clearTimeout(this.settleTimer);
+    this.pacer.drop();
+    for (const rt of [this.previewA, this.previewB, this.accumA, this.accumB, this.maskA, this.maskB]) rt.dispose();
+    this.convergenceMaterial.dispose();
     this.bloom.dispose();
     this.renderer.dispose();
   }
@@ -613,12 +700,11 @@ export class Engine {
     this.renderer.setSize(Math.round(cssW * dpr), Math.round(cssH * dpr), false);
     const w = Math.round(cssW * dpr);
     const h = Math.round(cssH * dpr);
-    const refine = Math.min(1, Math.sqrt(this.settings.maxRefinePixels / (w * h)));
-    const rw = Math.max(1, Math.round(w * refine));
-    const rh = Math.max(1, Math.round(h * refine));
-    this.accumA.setSize(rw, rh);
-    this.accumB.setSize(rw, rh);
-    this.bloom.setSize(rw, rh);
+    this.previewA.setSize(w, h);
+    this.previewB.setSize(w, h);
+    // bloom spread is relative to the image: a megapixel is plenty
+    const b = Math.min(1, Math.sqrt(1e6 / (w * h)));
+    this.bloom.setSize(Math.max(1, Math.round(w * b)), Math.max(1, Math.round(h * b)));
     this.updateFrame();
     this.invalidate();
   }
@@ -687,13 +773,7 @@ export class Engine {
       this.needsPreview = false;
       rendered = true;
       this.statusMode = 'preview';
-    } else if (!busy && idle > SETTLE_MS) {
-      if (this.glass.degraded) this.glass.rebuild();
-      if (this.samples < this.settings.targetSamples) {
-        this.statusMode = 'refine';
-        this.startPump();
-      } else this.statusMode = 'done';
-    }
+    } else if (!busy && idle > SETTLE_MS) this.settle();
     if (rendered || this.compositeOnly) {
       this.compositeOnly = false;
       this.renderBloom();
@@ -704,58 +784,95 @@ export class Engine {
 
     const more = this.needsPreview || busy || idle <= SETTLE_MS + 20;
     if (more) this.requestRender();
-    if (!busy && idle <= SETTLE_MS) {
-      // start refining when the settle time is over even if animation frames are throttled
-      clearTimeout(this.settleTimer);
-      this.settleTimer = window.setTimeout(this.settle, SETTLE_MS - idle + 5);
-    }
+    if (!busy && idle <= SETTLE_MS) this.scheduleSettle();
   };
 
   private settleTimer = 0;
+
+  /** Start refining when the settle time is over, even if animation frames are throttled. */
+  private scheduleSettle(): void {
+    clearTimeout(this.settleTimer);
+    const idle = performance.now() - this.lastChange;
+    this.settleTimer = window.setTimeout(this.settle, Math.max(0, SETTLE_MS - idle) + 5);
+  }
+
   private settle = (): void => {
-    if (this.disposed || this.suspended || this.needsPreview || this.interacting || this.controlsActive) return;
-    if (performance.now() - this.lastChange < SETTLE_MS) return;
+    if (!this.canPump()) return;
     if (this.glass.degraded) this.glass.rebuild();
-    if (this.samples < this.settings.targetSamples) {
-      this.statusMode = 'refine';
-      this.startPump();
-    }
+    if (!this.refined()) this.startPump();
   };
 
   // --- progressive refinement pump -------------------------------------------------------------
-  // Runs outside requestAnimationFrame: each band is issued only once the previous one finished
-  // on the GPU (fence), which keeps the GPU queue short and the UI responsive.
+  // Runs outside requestAnimationFrame in short, fenced bands (GpuPacer): first a few jittered
+  // passes of the deterministic tracer at native resolution (sharp, noise-free), then path
+  // tracing over the glass region until its blocks converge. The pacer leaves the GPU idle part
+  // of the time so that the rest of the system stays responsive.
 
   private pumping = false;
+
+  private canPump(): boolean {
+    return !(
+      this.disposed ||
+      this.suspended ||
+      this.needsPreview ||
+      this.interacting ||
+      this.controlsActive ||
+      !this.doc ||
+      document.hidden ||
+      performance.now() - this.lastChange < SETTLE_MS
+    );
+  }
+
+  private refined(): boolean {
+    return this.sharpPass >= PREVIEW_AA.length && this.refineState === 'done';
+  }
 
   private startPump(): void {
     if (this.pumping) return;
     this.pumping = true;
-    void yieldTask().then(this.pump);
+    void this.pumpLoop();
   }
 
-  private pump = (): void => {
-    if (this.disposed || this.suspended || this.needsPreview || this.interacting || this.controlsActive || !this.doc) {
+  private async pumpLoop(): Promise<void> {
+    try {
+      while (this.canPump()) {
+        const work = this.pumpStep();
+        if (!work) break;
+        await this.pacer.step(work.kind, work.pixels);
+      }
+    } finally {
       this.pumping = false;
-      return;
     }
-    if (this.samples >= this.settings.targetSamples) {
-      this.pumping = false;
+    // stopped by a pending change or a gesture: those reschedule; this covers everything else
+    if (!this.disposed && !this.refined()) this.scheduleSettle();
+    this.emitStatus(performance.now());
+  }
+
+  /** Issues the next band of work; null when the view is fully refined. */
+  private pumpStep(): { kind: string; pixels: number } | null {
+    if (this.sharpPass < PREVIEW_AA.length) {
+      this.statusMode = 'sharp';
+      const w = this.canvas.width;
+      const rows = this.pacer.rows('preview', w, this.canvas.height - this.sharpCursor);
+      this.renderSharpRows(rows);
+      return { kind: 'preview', pixels: w * rows };
+    }
+    if (this.refineState === 'none') this.beginRefine();
+    if (this.maskPending) this.readMask();
+    if (this.refineState === 'running' && (this.samples >= this.settings.targetSamples || this.activeBlocks === 0)) {
+      this.refineState = 'done';
+    }
+    if (this.refineState === 'done') {
       this.statusMode = 'done';
       this.requestRender(true);
-      return;
+      return null;
     }
-    if (!this.fenceDone()) {
-      // poll quickly while the band is young, then back off to spare the CPU
-      if (performance.now() - this.fenceStart < 40) void yieldTask().then(this.pump);
-      else setTimeout(this.pump, 1);
-      return;
-    }
-    const completed = this.renderSampleBand();
-    this.placeFence();
-    if (completed) this.requestRender(true);
-    void yieldTask().then(this.pump);
-  };
+    this.statusMode = 'refine';
+    const w = this.accumB.width;
+    const rows = this.pacer.rows('path', w, this.accumB.height - this.rowCursor);
+    this.renderPathRows(rows);
+    return { kind: 'path', pixels: w * rows };
+  }
 
   private adaptPreview(frameDt: number): void {
     if (frameDt <= 0 || frameDt > 250) return;
@@ -765,86 +882,188 @@ export class Engine {
     this.previewScale = Math.min(this.settings.previewScaleMax, Math.max(this.settings.previewScaleMin, this.previewScale));
   }
 
-  private fence: WebGLSync | null = null;
-  private fenceStart = 0;
-  private fenceRows = 0;
-
-  private placeFence(): void {
-    const gl = this.renderer.getContext() as WebGL2RenderingContext;
-    this.fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
-    gl.flush();
-    this.fenceStart = performance.now();
-    this.fenceRows = this.lastBandRows;
-  }
-
-  /** True when no band is in flight; adapts the band height to ~12 ms of GPU time. */
-  private fenceDone(): boolean {
-    if (!this.fence) return true;
-    const gl = this.renderer.getContext() as WebGL2RenderingContext;
-    const r = gl.clientWaitSync(this.fence, 0, 0);
-    if (r === gl.TIMEOUT_EXPIRED) return false;
-    gl.deleteSync(this.fence);
-    this.fence = null;
-    const ms = performance.now() - this.fenceStart;
-    if (this.fenceRows > 0 && ms > 0) {
-      const target = 10;
-      const ideal = (this.fenceRows * target) / ms;
-      const next = this.rowsPerFrame * 0.6 + ideal * 0.4;
-      this.rowsPerFrame = Math.max(4, Math.min(this.accumB.height, Math.round(next)));
-    }
-    return true;
-  }
-
+  /** Live preview: one pass at the adaptive resolution into the lower-left part of previewA. */
   private renderPreview(): void {
-    // preview resolution is relative to CSS pixels: high-DPR screens upscale the live preview
-    const k = Math.min(this.previewScale, this.dpr);
-    const w = Math.max(1, Math.round(this.cssW * k));
-    const h = Math.max(1, Math.round(this.cssH * k));
-    if (this.previewRT.width !== w || this.previewRT.height !== h) this.previewRT.setSize(w, h);
-    this.setFrameUniforms(this.previewMaterial.uniforms, w, h, this.scaledFrame(w));
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+    const k = this.previewScale * this.dpr;
+    const w = Math.max(1, Math.min(W, Math.round(this.cssW * k)));
+    const h = Math.max(1, Math.min(H, Math.round(this.cssH * k)));
+    const u = this.previewMaterial.uniforms;
+    this.setFrameUniforms(u, w, h, this.scaledFrame(w));
+    u.uSample.value = 0;
+    u.uPrev.value = this.previewB.texture;
+    this.previewA.viewport.set(0, 0, w, h);
     this.quad.material = this.previewMaterial;
-    this.renderer.setRenderTarget(this.previewRT);
+    this.renderer.setRenderTarget(this.previewA);
     this.quad.render(this.renderer);
+    this.previewA.viewport.set(0, 0, W, H);
+    this.shown = { rt: this.previewA, w, h };
   }
 
-  private renderSampleBand(): boolean {
+  /** Rows of the current anti-aliasing pass of the settled preview (native resolution). */
+  private renderSharpRows(rows: number): void {
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+    // even passes write B, odd passes A; the live preview in A is no longer shown by then
+    const write = this.sharpPass % 2 === 0 ? this.previewB : this.previewA;
+    const read = write === this.previewA ? this.previewB : this.previewA;
+    const u = this.previewMaterial.uniforms;
+    this.setFrameUniforms(u, W, H, this.scaledFrame(W));
+    const j = PREVIEW_AA[this.sharpPass];
+    (u.uJitter.value as Vector2).set(j[0], j[1]);
+    u.uSample.value = this.sharpPass;
+    u.uPrev.value = read.texture;
+    u.uMaxBounces.value = Math.max(SHARP_BOUNCES, this.settings.previewBounces);
+    const y0 = this.sharpCursor;
+    const n = Math.min(rows, H - y0);
+    write.viewport.set(0, 0, W, H);
+    write.scissor.set(0, y0, W, n);
+    write.scissorTest = true;
+    this.quad.material = this.previewMaterial;
+    this.renderer.setRenderTarget(write);
+    this.quad.render(this.renderer);
+    write.scissorTest = false;
+    u.uSample.value = 0;
+    (u.uJitter.value as Vector2).set(0, 0);
+    u.uMaxBounces.value = this.settings.previewBounces;
+    this.sharpCursor += n;
+    if (this.sharpCursor >= H) {
+      this.sharpCursor = 0;
+      this.sharpPass++;
+      this.shown = { rt: write, w: W, h: H };
+      this.requestRender(true);
+    }
+  }
+
+  /**
+   * Sets up path tracing for the current view: the region that can see the glass (projected
+   * bounds within the frame; the whole frame with depth of field), its accumulators and mask.
+   */
+  private beginRefine(): void {
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+    const frame = this.scaledFrame(W);
+    const frameInt: Rect = { x: Math.floor(frame.x), y: Math.floor(frame.y), w: Math.ceil(frame.w), h: Math.ceil(frame.h) };
+    const surface: Rect = { x: 0, y: 0, w: W, h: H };
+    let rect: Rect | null;
+    if ((this.doc?.effects.aperture ?? 0) > 0) rect = frameInt;
+    else {
+      const view: FrameView = { surfaceW: W, surfaceH: H, frame, tanHalfFov: this.tanHalf() };
+      rect = projectedRect(this.glass.bounds(), view, basisFromCamera(this.camera), 3);
+      rect = rect && intersectRect(rect, frameInt);
+    }
+    rect = rect && intersectRect(rect, surface);
+    this.refineRect = rect;
+    this.samples = 0;
+    this.rowCursor = 0;
+    this.maskPending = false;
+    if (!rect) {
+      this.refineState = 'done';
+      this.activeBlocks = this.totalBlocks = 0;
+      return;
+    }
+    const scale = Math.min(1, Math.sqrt(this.settings.maxRefinePixels / (rect.w * rect.h)));
+    const aw = Math.max(1, Math.round(rect.w * scale));
+    const ah = Math.max(1, Math.round(rect.h * scale));
+    const sx = aw / rect.w;
+    const sy = ah / rect.h;
+    this.refineFrame = { x: (frame.x - rect.x) * sx, y: (frame.y - rect.y) * sy, w: frame.w * sx, h: frame.h * sy };
+    for (const rt of [this.accumA, this.accumB]) if (rt.width !== aw || rt.height !== ah) rt.setSize(aw, ah);
+    const [mw, mh] = maskSize(aw, ah);
+    for (const rt of [this.maskA, this.maskB]) if (rt.width !== mw || rt.height !== mh) rt.setSize(mw, mh);
+    if (this.maskPixels.length !== mw * mh * 4) this.maskPixels = new Uint8Array(mw * mh * 4);
+    this.clearTarget(this.maskA, 1);
+    this.totalBlocks = this.activeBlocks = mw * mh;
+    this.refineState = 'running';
+  }
+
+  clearTarget(rt: WebGLRenderTarget, value: number): void {
+    const prev = this.renderer.getClearColor(new Color());
+    const alpha = this.renderer.getClearAlpha();
+    this.renderer.setClearColor(new Color(value, value, value), value);
+    this.renderer.setRenderTarget(rt);
+    this.renderer.clear(true, false, false);
+    this.renderer.setClearColor(prev, alpha);
+  }
+
+  /** Rows of the current path tracing sample over the glass region. */
+  private renderPathRows(rows: number): void {
     const read = this.accumA;
     const write = this.accumB;
     const w = write.width;
     const h = write.height;
     const u = this.pathMaterial.uniforms;
-    this.setFrameUniforms(u, w, h, this.scaledFrame(w));
+    this.setFrameUniforms(u, w, h, this.refineFrame);
     u.uPrev.value = read.texture;
     u.uSample.value = this.samples;
     u.uSeed.value = 1;
+    u.uActive.value = this.maskA.texture;
+    u.uUseMask.value = 1;
     const fx = this.doc!.effects;
     u.uLensRadius.value = fx.aperture * 0.06 * fx.focusDistance;
     u.uFocusDist.value = fx.focusDistance;
     const y0 = this.rowCursor;
-    const rows = Math.min(this.rowsPerFrame, h - y0);
-    this.lastBandRows = rows;
-    write.scissor.set(0, y0, w, rows);
-    write.scissorTest = rows < h;
+    const n = Math.min(rows, h - y0);
+    write.scissor.set(0, y0, w, n);
+    write.scissorTest = n < h;
     this.quad.material = this.pathMaterial;
     this.renderer.setRenderTarget(write);
     this.quad.render(this.renderer);
     write.scissorTest = false;
-    this.rowCursor += rows;
-    if (this.rowCursor >= h) {
-      this.rowCursor = 0;
-      this.accumA = write;
-      this.accumB = read;
-      this.samples++;
-      return true;
+    u.uUseMask.value = 0;
+    this.rowCursor += n;
+    if (this.rowCursor < h) return;
+    this.rowCursor = 0;
+    this.accumA = write;
+    this.accumB = read;
+    this.samples++;
+    const { minSamples, tolerance } = this.settings.refine;
+    if (this.samples >= minSamples && this.samples % CHECK_INTERVAL === 0) this.updateMask(tolerance);
+    const now = performance.now();
+    if (this.samples >= MIX_START && now - this.lastRefineComposite > REFINE_COMPOSITE_MS) {
+      this.lastRefineComposite = now;
+      this.requestRender(true);
     }
-    return false;
+  }
+
+  /** Convergence check; the result is read back once the GPU is done with it (readMask). */
+  private updateMask(tolerance: number): void {
+    const u = this.convergenceMaterial.uniforms;
+    u.uAccum.value = this.accumA.texture;
+    u.uMaskPrev.value = this.maskA.texture;
+    u.uSamples.value = this.samples;
+    u.uTol.value = tolerance;
+    const c = this.compositeMaterial.uniforms;
+    u.uExposure.value = c.uExposure.value;
+    u.uToneMapping.value = c.uToneMapping.value;
+    this.quad.material = this.convergenceMaterial;
+    this.renderer.setRenderTarget(this.maskB);
+    this.quad.render(this.renderer);
+    const t = this.maskA;
+    this.maskA = this.maskB;
+    this.maskB = t;
+    this.maskPending = true;
+  }
+
+  private readMask(): void {
+    this.maskPending = false;
+    const m = this.maskA;
+    this.renderer.readRenderTargetPixels(m, 0, 0, m.width, m.height, this.maskPixels);
+    this.activeBlocks = countActive(this.maskPixels);
   }
 
   private mixAccum(): number {
-    const s = this.samples;
-    if (s < 2) return 0;
-    const x = Math.min(1, (s - 2) / 10);
+    if (!this.refineRect) return 0;
+    if (this.refineState === 'done' && this.samples > 0) return 1;
+    const x = Math.min(1, Math.max(0, (this.samples - MIX_START) / (MIX_END - MIX_START)));
     return x * x * (3 - 2 * x);
+  }
+
+  /** Accumulator rect for compositing: GL origin, native canvas pixels. */
+  private accumRectGL(): [number, number, number, number] {
+    const r = this.refineRect ?? { x: 0, y: 0, w: 1, h: 1 };
+    return [r.x, this.canvas.height - (r.y + r.h), r.w, r.h];
   }
 
   private renderBloom(): void {
@@ -853,12 +1072,23 @@ export class Engine {
       this.bloomTex = null;
       return;
     }
+    const s = this.shown;
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+    const [rx, ry, rw, rh] = this.accumRectGL();
+    const mix = this.mixAccum();
     this.bloomTex = this.bloom.render(
       this.renderer,
       this.quad,
       this.bloomDown,
       this.bloomUp,
-      { a: this.previewRT.texture, b: this.accumA.texture, mix: this.mixAccum() },
+      {
+        a: s.rt.texture,
+        aScale: [s.w / s.rt.width, s.h / s.rt.height],
+        b: mix > 0 ? this.accumA.texture : null,
+        bRect: [rx / W, ry / H, rw / W, rh / H],
+        mix,
+      },
       this.bloomThreshold(),
       fx.bloomRadius,
     );
@@ -870,8 +1100,13 @@ export class Engine {
 
   private composite(): void {
     const c = this.compositeMaterial.uniforms;
-    c.uPreview.value = this.previewRT.texture;
+    const s = this.shown;
+    c.uPreview.value = s.rt.texture;
+    const pw = s.rt.width;
+    const ph = s.rt.height;
+    (c.uPreviewTransform.value as Vector4).set(s.w / pw, s.h / ph, (s.w - 0.5) / pw, (s.h - 0.5) / ph);
     c.uAccum.value = this.accumA.texture;
+    (c.uAccumRect.value as Vector4).set(...this.accumRectGL());
     c.uMixAccum.value = this.mixAccum();
     c.uBloom.value = this.bloomTex ?? this.blackTexture;
     (c.uBloomTransform.value as Vector4).set(1, 1, 0, 0);
@@ -887,6 +1122,14 @@ export class Engine {
     this.quad.render(this.renderer);
   }
 
+  private progress(): number {
+    if (this.statusMode === 'done') return 1;
+    if (this.statusMode !== 'refine') return 0;
+    const bySamples = Math.min(1, this.samples / this.settings.targetSamples);
+    const remaining = this.totalBlocks > 0 ? this.activeBlocks / this.totalBlocks : 1;
+    return 1 - remaining * (1 - bySamples);
+  }
+
   private emitStatus(now: number): void {
     if (!this.events.onStatus) return;
     if (now - this.lastStatus < 120 && this.statusMode === 'refine') return;
@@ -895,11 +1138,18 @@ export class Engine {
       mode: this.statusMode,
       samples: this.samples,
       target: this.settings.targetSamples,
+      progress: this.progress(),
       previewScale: this.previewScale,
       fps: 1000 / this.frameEma,
       tier: this.tier,
     });
   }
+
+  private onVisibility = (): void => {
+    if (document.hidden) return;
+    this.requestRender();
+    this.scheduleSettle();
+  };
 
   private onAnyPointerUp = (e: PointerEvent): void => {
     if (e.buttons === 0 && this.controlsActive) {

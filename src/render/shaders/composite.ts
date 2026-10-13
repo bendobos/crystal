@@ -1,32 +1,5 @@
-/**
- * Final image: preview/refined blend, bloom, exposure, tone mapping, grading, vignette, grain and
- * output encoding. The colour math must match displayTransform() in render/color.ts.
- */
-export const compositeFragment = /* glsl */ `
-precision highp float;
-precision highp int;
-
-in vec2 vUv;
-out vec4 fragColor;
-
-uniform sampler2D uPreview;
-uniform sampler2D uAccum;
-uniform sampler2D uBloom;
-uniform vec4 uBloomTransform;   // bloom texture covers the frame; maps vUv into it
-uniform float uMixAccum;
-uniform float uBloomStrength;
-uniform float uExposure;        // linear multiplier
-uniform int uToneMapping;       // 0 agx, 1 neutral
-uniform float uContrast;
-uniform float uSaturation;
-uniform mat3 uOutFrom2020;
-uniform float uVignette;
-uniform float uGrain;
-uniform vec2 uFrameOrigin;      // output pixels
-uniform vec2 uFrameSize;        // output pixels
-uniform float uFrameAspect;
-uniform uint uNoiseSeed;
-
+/** Tone mapping and output encoding, shared with the convergence test (render/adaptive.ts). */
+export const toneGLSL = /* glsl */ `
 const mat3 SRGB_TO_REC2020 = mat3(
 	vec3( 0.6274, 0.0691, 0.0164 ),
 	vec3( 0.3293, 0.9195, 0.0880 ),
@@ -77,7 +50,40 @@ vec3 neutral( vec3 color ) {
 float srgbOetf( float c ) {
 	return c <= 0.0031308 ? c * 12.92 : 1.055 * pow( c, 1.0 / 2.4 ) - 0.055;
 }
+`;
 
+/**
+ * Final image: preview/refined blend, bloom, exposure, tone mapping, grading, vignette, grain and
+ * output encoding. The colour math must match displayTransform() in render/color.ts.
+ */
+export const compositeFragment = /* glsl */ `
+precision highp float;
+precision highp int;
+
+in vec2 vUv;
+out vec4 fragColor;
+
+uniform sampler2D uPreview;
+uniform sampler2D uAccum;
+uniform sampler2D uBloom;
+uniform vec4 uBloomTransform;   // bloom texture covers the frame; maps vUv into it
+uniform vec4 uPreviewTransform; // xy: uv scale into the used part of uPreview, zw: largest uv
+uniform vec4 uAccumRect;        // output pixels covered by uAccum: xy origin, zw size
+uniform float uMixAccum;
+uniform float uBloomStrength;
+uniform float uExposure;        // linear multiplier
+uniform int uToneMapping;       // 0 agx, 1 neutral
+uniform float uContrast;
+uniform float uSaturation;
+uniform mat3 uOutFrom2020;
+uniform float uVignette;
+uniform float uGrain;
+uniform vec2 uFrameOrigin;      // output pixels
+uniform vec2 uFrameSize;        // output pixels
+uniform float uFrameAspect;
+uniform uint uNoiseSeed;
+
+${toneGLSL}
 uint hashU( uint x ) {
 	x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u;
 	return x;
@@ -87,10 +93,27 @@ float hashPixel( ivec2 p, uint salt ) {
 	return float( hashU( uint( p.x ) * 73856093u ^ uint( p.y ) * 19349663u ^ salt ) ) * ( 1.0 / 4294967296.0 );
 }
 
+// bilinear by hand: float targets are not filterable everywhere
+vec3 accumAt( vec2 q ) {
+	ivec2 size = textureSize( uAccum, 0 );
+	vec2 p = q * vec2( size ) - 0.5;
+	vec2 f = fract( p );
+	ivec2 i = ivec2( floor( p ) );
+	ivec2 hi = size - 1;
+	vec3 a = texelFetch( uAccum, clamp( i, ivec2( 0 ), hi ), 0 ).rgb;
+	vec3 b = texelFetch( uAccum, clamp( i + ivec2( 1, 0 ), ivec2( 0 ), hi ), 0 ).rgb;
+	vec3 c = texelFetch( uAccum, clamp( i + ivec2( 0, 1 ), ivec2( 0 ), hi ), 0 ).rgb;
+	vec3 d = texelFetch( uAccum, clamp( i + ivec2( 1, 1 ), ivec2( 0 ), hi ), 0 ).rgb;
+	return mix( mix( a, b, f.x ), mix( c, d, f.x ), f.y );
+}
+
 void main() {
-	vec3 pre = texture( uPreview, vUv ).rgb;
-	vec3 acc = texture( uAccum, vUv ).rgb;
-	vec3 hdr = mix( pre, acc, uMixAccum );
+	vec3 pre = texture( uPreview, min( vUv * uPreviewTransform.xy, uPreviewTransform.zw ) ).rgb;
+	vec3 hdr = pre;
+	vec2 q = ( gl_FragCoord.xy - uAccumRect.xy ) / uAccumRect.zw;
+	if ( uMixAccum > 0.0 && all( greaterThanEqual( q, vec2( 0.0 ) ) ) && all( lessThan( q, vec2( 1.0 ) ) ) ) {
+		hdr = mix( pre, accumAt( q ), uMixAccum );
+	}
 	hdr += texture( uBloom, vUv * uBloomTransform.xy + uBloomTransform.zw ).rgb * uBloomStrength;
 
 	vec3 x = hdr * uExposure;
@@ -129,13 +152,19 @@ precision highp float;
 in vec2 vUv;
 out vec4 fragColor;
 uniform sampler2D uSrc;
+uniform vec2 uSrcScale;     // uv scale into the used part of uSrc
 uniform sampler2D uSrc2;
+uniform vec4 uSrc2Rect;     // part of the image uSrc2 covers (uv): xy origin, zw size
 uniform float uMix2;
 uniform vec2 uTexel;
 uniform float uThreshold;
 uniform int uBright;
 vec3 fetch( vec2 uv ) {
-	vec3 c = uMix2 >= 0.0 ? mix( texture( uSrc, uv ).rgb, texture( uSrc2, uv ).rgb, uMix2 ) : texture( uSrc, uv ).rgb;
+	vec3 c = texture( uSrc, uv * uSrcScale ).rgb;
+	if ( uMix2 >= 0.0 ) {
+		vec2 q = ( uv - uSrc2Rect.xy ) / uSrc2Rect.zw;
+		if ( all( greaterThanEqual( q, vec2( 0.0 ) ) ) && all( lessThanEqual( q, vec2( 1.0 ) ) ) ) c = mix( c, texture( uSrc2, q ).rgb, uMix2 );
+	}
 	if ( uBright == 1 ) {
 		float l = max( c.r, max( c.g, c.b ) );
 		c *= smoothstep( uThreshold, uThreshold * 2.0 + 0.5, l );

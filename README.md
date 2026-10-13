@@ -25,16 +25,20 @@ npm run build      # Typecheck + Produktions-Build inkl. Service Worker
 - **WYSIWYG:** Vorschau und Export teilen dieselben Shader-Bausteine. Die Vorschau folgt dem dominanten Lichtpfad (rauschfrei); der Pathtracer verzweigt stochastisch (Fresnel, mit Importance-Mix und stratifizierten ersten Entscheidungen) und tastet Wellenlängen spektral ab.
 - **Feste Mesh-Topologie** pro Qualitätsstufe: Beim Ziehen wird die BVH nur „refittet“; nach dem Loslassen folgt ein SAH-Neuaufbau.
 - **Hintergrundfarben sind exakt:** Die HDR-Radianz des Hintergrunds wird über die Umkehrung der Display-Transformation bestimmt (`render/color.ts` spiegelt den Composite-Shader).
-- **Verfeinerung ohne Ruckeln:** Pfad-Samples laufen zeilenweise in einer Pumpe außerhalb von `requestAnimationFrame`; jedes Band wird erst nach dem GPU-Fence des vorherigen ausgegeben (`Engine.pump`).
+- **Vorschau in Stufen:** Beim Ziehen rendert der deterministische Tracer mit adaptiver Auflösung. Sobald die Ansicht ruht, folgen 6 gejitterte Durchgänge in nativer Auflösung (scharf, rauschfrei, nach Sekundenbruchteilen). Danach läuft der Pathtracer nur im Bildbereich, der Glas sehen kann (projizierte Bounding-Box ∩ Rahmen), und wird ab 16 Samples überblendet.
+- **GPU-Pacing (`render/adaptive.ts`):** Alle Hintergrundarbeit läuft in kurzen Bändern mit Fences. Die Viewport-Verfeinerung lässt die GPU per Duty-Cycle teilweise frei (`gpuBudget` je Stufe) und pausiert bei verdecktem Tab. Der Export nutzt kurze Draws (~24 ms), setzt aber nur etwa alle 120 ms einen Fence: Jeder Fence kostet eine Leerlauf-Rundreise.
+- **Adaptives Sampling:** Der Akkumulator führt im Alpha-Kanal das zweite Moment mit. Ein Konvergenztest pro 8×8-Block schätzt den Fehler nach Tonemapping in 8-Bit-Stufen und beendet ruhige Blöcke (Maske monoton, Mittel bleibt korrekt).
 
 ### Messwerte (MacBook M2, Chrome)
 
-- Live-Vorschau ≈ 12 ms/MP, Pathtracing ≈ 13 ms/MP pro Sample
-- iPhone-Wallpaper 1206×2622, Qualität „Hoch“ (192 Samples): wenige Sekunden pro Megapixel
+- Deterministischer Tracer ≈ 6–10 ms/MP. Pathtracing: Hintergrund ≈ 3 ms/MP, Glaspixel ≈ 300–450 ms/MP pro Sample (lange Pfade). Die Exportzeit hängt fast nur von der Glasfläche ab.
+- Viewport: scharfe Vorschau ≈ 0,3–0,5 s nach dem Loslassen
+- iPhone-Wallpaper 1206×2622, „Maximal“ (640 Samples): ≈ 100 s; „Hoch“ (192): ≈ 30 s
 - Video „Schnell“: ≈ 0,1 s pro Bild bei 482×1048
 
 ### Entwicklung
 
 - `window.engine` / `window.store` stehen im Dev-Build zum Debuggen bereit.
 - `window.qa(name, { scale, samples, preview })` rendert das aktive Format offline und speichert es über den Dev-Server in `.qa/` (nur `npm run dev`).
-- `engine.benchmark()` misst Vorschau- und Pathtracing-Kosten in ms pro Megapixel.
+- `window.qa(name, { …, tolerance, minSamples })` rendert mit adaptivem Sampling (Toleranz in 8-Bit-Stufen).
+- `engine.benchmark()` misst Kosten in ms pro Megapixel: die scharfe Vorschau in nativer Auflösung und Pathtracing über den Glasbereich.

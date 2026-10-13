@@ -1,10 +1,14 @@
-import { HalfFloatType, LinearFilter, RGBAFormat, Vector2, WebGLRenderTarget, type RawShaderMaterial, type Texture, type WebGLRenderer } from 'three';
+import { HalfFloatType, LinearFilter, RGBAFormat, Vector2, Vector4, WebGLRenderTarget, type RawShaderMaterial, type Texture, type WebGLRenderer } from 'three';
 import type { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 
 export interface BloomSource {
   a: Texture;
+  /** uv scale into the used part of `a` (default: all of it). */
+  aScale?: [number, number];
   /** Optional second texture blended in with `mix` (preview ↔ refined). */
   b: Texture | null;
+  /** Part of the image `b` covers, in uv (origin x, y, size w, h; default: all of it). */
+  bRect?: [number, number, number, number];
   mix: number;
 }
 
@@ -51,6 +55,9 @@ export class BloomChain {
       d.uSrc.value = prev;
       d.uSrc2.value = i === 0 && src.b ? src.b : prev;
       d.uMix2.value = i === 0 && src.b ? src.mix : -1;
+      const scale = i === 0 ? (src.aScale ?? [1, 1]) : [1, 1];
+      (d.uSrcScale.value as Vector2).set(scale[0], scale[1]);
+      (d.uSrc2Rect.value as Vector4).set(...(src.bRect ?? [0, 0, 1, 1]));
       d.uBright.value = i === 0 ? 1 : 0;
       const pw = i === 0 ? rt.width * 2 : this.mips[i - 1].width;
       const ph = i === 0 ? rt.height * 2 : this.mips[i - 1].height;

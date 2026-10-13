@@ -1,4 +1,4 @@
-import { BufferAttribute, BufferGeometry, DoubleSide, Ray, Vector3 } from 'three';
+import { Box3, BufferAttribute, BufferGeometry, DoubleSide, Ray, Vector3 } from 'three';
 import { CENTER, FloatVertexAttributeTexture, MeshBVH, MeshBVHUniformStruct, SAH } from 'three-mesh-bvh';
 import type { ShapeDoc } from '../model/types';
 import { sweepShape, type SweepQuality, type SweepResult } from '../geometry/sweep';
@@ -68,6 +68,12 @@ export class GlassMesh {
     this.struct.updateFrom(this.bvh);
     this.normalTex.updateFrom(this.geometry.attributes.normal as BufferAttribute);
     this.version++;
+  }
+
+  /** Bounding box of the current geometry (empty when there is none). */
+  bounds(target = new Box3()): Box3 {
+    if (!this.bvh) return target.makeEmpty();
+    return this.bvh.getBoundingBox(target);
   }
 
   raycast(origin: Vector3, direction: Vector3): SurfaceHit | null {

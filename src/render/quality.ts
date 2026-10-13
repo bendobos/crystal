@@ -1,47 +1,59 @@
 import type { WebGLRenderer } from 'three';
+import type { AdaptiveSettings } from './adaptive';
 
 export type QualityTier = 'low' | 'medium' | 'high';
 
 export interface TierSettings {
   /** Device pixel ratio cap for the canvas. */
   maxDpr: number;
+  /** Live preview resolution while interacting, relative to device pixels (adaptive). */
   previewScaleMin: number;
   previewScaleMax: number;
   previewBounces: number;
   /** Target frame time for the adaptive preview resolution. */
   previewFrameMs: number;
-  /** Pixel budget for the progressive refinement in the viewport. */
+  /** Pixel budget for path tracing the glass region in the viewport. */
   maxRefinePixels: number;
+  /** Upper bound of path samples in the viewport; most blocks stop earlier (see `refine`). */
   targetSamples: number;
+  refine: AdaptiveSettings;
+  /** Share of GPU time the background refinement may use, so the system stays responsive. */
+  gpuBudget: number;
 }
 
 export const TIER_SETTINGS: Record<QualityTier, TierSettings> = {
   low: {
     maxDpr: 2,
-    previewScaleMin: 0.3,
-    previewScaleMax: 0.6,
+    previewScaleMin: 0.2,
+    previewScaleMax: 0.5,
     previewBounces: 6,
     previewFrameMs: 33,
-    maxRefinePixels: 0.8e6,
-    targetSamples: 128,
+    maxRefinePixels: 0.5e6,
+    targetSamples: 64,
+    refine: { minSamples: 24, tolerance: 3 },
+    gpuBudget: 0.5,
   },
   medium: {
     maxDpr: 2,
-    previewScaleMin: 0.35,
-    previewScaleMax: 0.8,
+    previewScaleMin: 0.25,
+    previewScaleMax: 0.6,
     previewBounces: 8,
     previewFrameMs: 28,
-    maxRefinePixels: 1.4e6,
-    targetSamples: 256,
+    maxRefinePixels: 1.2e6,
+    targetSamples: 128,
+    refine: { minSamples: 32, tolerance: 2 },
+    gpuBudget: 0.5,
   },
   high: {
     maxDpr: 2,
-    previewScaleMin: 0.4,
-    previewScaleMax: 1,
+    previewScaleMin: 0.3,
+    previewScaleMax: 0.75,
     previewBounces: 10,
     previewFrameMs: 22,
-    maxRefinePixels: 2.2e6,
-    targetSamples: 384,
+    maxRefinePixels: 3e6,
+    targetSamples: 256,
+    refine: { minSamples: 32, tolerance: 1.5 },
+    gpuBudget: 0.6,
   },
 };
 

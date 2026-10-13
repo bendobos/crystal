@@ -1,6 +1,7 @@
 import { BVHShaderGLSL } from 'three-mesh-bvh';
 import { environmentGLSL } from './environment';
 import { PREVIEW_TAPS } from '../spectral';
+import { BLOCK } from '../adaptive';
 
 export const fullscreenVertex = /* glsl */ `
 precision highp float;
@@ -335,9 +336,16 @@ vec4 trace( vec3 ro, vec3 rd, vec2 uv, float lambda, vec4 offs, inout uint rng )
 	return vec4( thr * environment( ro, rd ) * ( spectral ? w : vec3( 1.0 ) ), alpha );
 }
 
+uniform sampler2D uActive;      // convergence mask, one texel per block
+uniform int uUseMask;
+
 out vec4 fragColor;
 void main() {
 	ivec2 ip = ivec2( gl_FragCoord.xy );
+	if ( uUseMask == 1 && texelFetch( uActive, ip / ${BLOCK}, 0 ).r < 0.5 ) {
+		fragColor = texelFetch( uPrev, ip, 0 );
+		return;
+	}
 	uint rng = uint( ip.x ) * 1973u + uint( ip.y ) * 9277u + uSeed * 26699u + uint( uSample ) * 1597334677u;
 	rng = rng | 1u;
 	pcg( rng );
@@ -363,6 +371,9 @@ void main() {
 	vec4 s = trace( ro, rd, uv, lambda, offs, rng );
 	// clamp extreme outliers so single samples cannot dominate the average
 	s.rgb = clamp( s.rgb, vec3( - 64.0 ), vec3( 64.0 ) );
+	// alpha carries the second moment of the sample mean (rgb average) for the convergence test
+	float m = ( s.r + s.g + s.b ) / 3.0;
+	s.a = m * m;
 	vec4 prev = texelFetch( uPrev, ip, 0 );
 	fragColor = uSample == 0 ? s : mix( prev, s, 1.0 / float( uSample + 1 ) );
 }

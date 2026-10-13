@@ -4,10 +4,17 @@ import { OfflineRenderer } from './OfflineRenderer';
 import { deliverFiles, encodeImage, type ImageFormat } from './encode';
 import { formatById } from './formats';
 import type { OutputSpace } from '../render/color';
+import type { AdaptiveSettings } from '../render/adaptive';
 
 export type ExportQuality = 'draft' | 'high' | 'max';
 
+/** Upper bound of path samples per pixel; converged blocks stop earlier (QUALITY_ADAPTIVE). */
 export const QUALITY_SAMPLES: Record<ExportQuality, number> = { draft: 48, high: 192, max: 640 };
+export const QUALITY_ADAPTIVE: Record<ExportQuality, AdaptiveSettings> = {
+  draft: { minSamples: 16, tolerance: 2 },
+  high: { minSamples: 32, tolerance: 1 },
+  max: { minSamples: 64, tolerance: 0.5 },
+};
 export const QUALITY_LABEL: Record<ExportQuality, string> = { draft: 'Entwurf', high: 'Hoch', max: 'Maximal' };
 
 export interface StillSettings {
@@ -38,7 +45,7 @@ export async function exportStills(
 ): Promise<{ name: string; blob: Blob }[]> {
   const engine = getEngine();
   if (!engine) throw new Error('Renderer nicht bereit');
-  const tile = window.matchMedia?.('(pointer: coarse)').matches ? 512 : 768;
+  const tile = window.matchMedia?.('(pointer: coarse)').matches ? 768 : 1024;
   const samples = QUALITY_SAMPLES[settings.quality];
   const totalPixels = targets.reduce((a, t) => a + t.width * t.height, 0);
   let donePixels = 0;
@@ -65,6 +72,7 @@ export async function exportStills(
         height: t.height,
         camera: t.camera ?? doc.camera,
         samples,
+        adaptive: QUALITY_ADAPTIVE[settings.quality],
         space: settings.space,
         tileSize: tile,
         signal,
