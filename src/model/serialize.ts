@@ -24,6 +24,7 @@ const schema = z.object({
     detail: z.string().max(8000).nullable(),
     taper: num(0, 1).optional(),
     blend: num(0, 2).optional(),
+    thorns: num(0, 24).optional(),
     branches: z
       .array(z.object({ t: num(0, 1), points: z.array(vec3).min(1).max(40), width: num(0.01, 5) }))
       .max(24)

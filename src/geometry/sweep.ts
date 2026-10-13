@@ -75,12 +75,12 @@ export function effectiveShape(shape: ShapeDoc, segments: number): EffectiveShap
 
 export function topologyKeyFor(shape: ShapeDoc, q: SweepQuality): string {
   const e = effectiveShape(shape, q.segments);
-  return [q.rings, q.segments, q.capRings, e.strands, e.closed ? 1 : 0, e.shift, e.strandShift, activeBranches(shape).length].join('|');
+  return [q.rings, q.segments, q.capRings, e.strands, e.closed ? 1 : 0, e.shift, e.strandShift, thornCount(shape)].join('|');
 }
 
 /** Whether sweeping `shape` at quality `q` fuses its thorns into the tube (single strand only). */
 export function hasFillets(shape: ShapeDoc, q: SweepQuality): boolean {
-  return !!q.fillets && (shape.blend ?? 1) > 0 && Math.round(shape.strands) <= 1 && activeBranches(shape).length > 0;
+  return !!q.fillets && (shape.blend ?? 1) > 0 && Math.round(shape.strands) <= 1 && thornCount(shape) > 0;
 }
 
 /** Rings along each branch (fixed per quality, independent of the branch length). */
@@ -89,7 +89,15 @@ export function branchRings(q: SweepQuality): number {
 }
 
 function activeBranches(shape: ShapeDoc): BranchDoc[] {
-  return (shape.branches ?? []).filter((b) => b.points.length > 0).slice(0, 24);
+  return (shape.branches ?? []).filter((b) => b.points.length > 0).slice(0, MAX_THORNS);
+}
+
+export const MAX_THORNS = 24;
+
+/** Number of thorns the shape shows: `thorns` if set, otherwise all designed ones. */
+export function thornCount(shape: ShapeDoc): number {
+  const n = shape.thorns ?? activeBranches(shape).length;
+  return Math.max(0, Math.min(MAX_THORNS, Math.round(n)));
 }
 
 /** Radius factor towards a sharp tip: u = 1 at full width, 0 at the tip; concave like a thorn. */
@@ -133,7 +141,6 @@ export function sweepShape(shape: ShapeDoc, q: SweepQuality, reuse?: SweepResult
   const Q = N + 2 * K; // rings per strand including caps
   const poles = closed ? 0 : 2;
   const vertsPerStrand = Q * M + poles;
-  const branches = activeBranches(shape);
   const NB = branchRings(q);
   const vertsPerBranch = (NB + 2 * q.capRings) * M + 2;
   const mainVerts = vertsPerStrand * S;
@@ -189,6 +196,106 @@ export function sweepShape(shape: ShapeDoc, q: SweepQuality, reuse?: SweepResult
   const taper = shape.taper ?? 0;
   /** Radius factor of the main tube at t: brush detail and tapered ends. */
   const radiusScale = (t: number) => (detail ? Math.exp(sampleScalar(detail.radius, t, closed)) : 1) * taperAt(t, taper, closed);
+
+  // --- thorns: the designed ones, thinned out or topped up to the requested count -------------
+  /** Sideways (within the curve's plane) and tangent directions at curve parameter t. */
+  const planeNormal = curvePlaneNormal(centers, N);
+  const axesAt = (t: number) => {
+    const r = Math.round(closed ? t * N : t * (N - 1)) % N;
+    const along = [FT[r * 3], FT[r * 3 + 1], FT[r * 3 + 2]];
+    const n = planeNormal;
+    let wide = [n[1] * along[2] - n[2] * along[1], n[2] * along[0] - n[0] * along[2], n[0] * along[1] - n[1] * along[0]];
+    const l = Math.hypot(wide[0], wide[1], wide[2]);
+    // tangent along the plane normal (rare): fall back to the profile's normal
+    wide = l > 1e-3 ? wide.map((x) => x / l) : [FN[r * 3], FN[r * 3 + 1], FN[r * 3 + 2]];
+    return { wide, along };
+  };
+  const branches = resolveThorns(activeBranches(shape), thornCount(shape));
+
+  function resolveThorns(designed: BranchDoc[], count: number): BranchDoc[] {
+    const dist = (a: number, b: number) => {
+      const d = Math.abs(a - b);
+      return closed ? Math.min(d, 1 - d) : d;
+    };
+    // order the designed thorns so that every prefix is spread along the curve (removing
+    // thorns thins them out evenly instead of dropping one end)
+    const rest = designed.map((_, i) => i);
+    const order: number[] = [];
+    while (rest.length) {
+      let best = 0, bestD = -Infinity;
+      rest.forEach((i, k) => {
+        const d = order.length ? Math.min(...order.map((o) => dist(designed[o].t, designed[i].t))) : -Math.abs(designed[i].t - 0.5);
+        if (d > bestD) {
+          bestD = d;
+          best = k;
+        }
+      });
+      order.push(rest.splice(best, 1)[0]);
+    }
+    const out = order.slice(0, count).map((i) => designed[i]);
+    const sides: number[] = out.map((b) => {
+      const { wide } = axesAt(b.t);
+      const p = b.points[b.points.length - 1];
+      return p[0] * wide[0] + p[1] * wide[1] + p[2] * wide[2] < 0 ? -1 : 1;
+    });
+    // new thorns go into the largest gap
+    const centroid = [0, 0, 0];
+    for (let r = 0; r < N; r++) for (let c = 0; c < 3; c++) centroid[c] += centers[r * 3 + c] / N;
+    const lo = closed ? 0 : 0.08 + taper * 0.2;
+    const hi = closed ? 1 : 1 - lo;
+    while (out.length < count) {
+      const ts = out.map((b) => b.t).sort((a, b) => a - b);
+      let t = closed ? 0 : (lo + hi) / 2;
+      let spacing = closed ? 1 : (hi - lo) / 2;
+      if (ts.length && closed) {
+        spacing = -1;
+        ts.forEach((a, i) => {
+          const gap = (i + 1 < ts.length ? ts[i + 1] : ts[0] + 1) - a;
+          if (gap / 2 > spacing) {
+            spacing = gap / 2;
+            t = (a + gap / 2) % 1;
+          }
+        });
+      } else if (ts.length) {
+        // ends count double: a thorn there has no neighbour on the outside
+        const cands: [number, number][] = [[lo, ts[0] - lo], [hi, hi - ts[ts.length - 1]]];
+        for (let i = 0; i + 1 < ts.length; i++) cands.push([(ts[i] + ts[i + 1]) / 2, (ts[i + 1] - ts[i]) / 2]);
+        [t, spacing] = cands.reduce((a, b) => (b[1] > a[1] ? b : a));
+      }
+      // closed shapes: always outwards (a crown); open ones: the side with fewer thorns nearby
+      let side: number;
+      if (closed) {
+        const { wide } = axesAt(t);
+        const r = Math.round(t * N) % N;
+        let d = 0;
+        for (let c = 0; c < 3; c++) d += (centers[r * 3 + c] - centroid[c]) * wide[c];
+        side = d < 0 ? -1 : 1;
+      } else {
+        let balance = 0;
+        out.forEach((b, i) => (balance += sides[i] * Math.exp(-((dist(b.t, t) / 0.15) ** 2))));
+        side = balance > 1e-3 ? -1 : balance < -1e-3 ? 1 : out.length % 2 ? 1 : -1;
+      }
+      out.push(sickle(t, Math.max(spacing, 0) * spline.length, side));
+      sides.push(side);
+    }
+    return out;
+  }
+
+  /** A generated thorn: a sickle in the profile's plane, curving towards the curve's end. */
+  function sickle(t: number, spacing: number, side: number): BranchDoc {
+    const { wide, along } = axesAt(t);
+    const rs = Math.min(1, radiusScale(t));
+    // long enough to clear the tube (its local half-width) and reach well into the gap
+    const L = R * radiusScale(t) + Math.min(7 * R, Math.max(4 * R, 2.5 * spacing)) * (0.6 + 0.4 * rs);
+    const points: Vec3[] = [];
+    const p = [0, 0, 0];
+    for (const f of [1 / 3, 2 / 3, 1]) {
+      const a = 0.35 + 0.75 * f * f;
+      for (let c = 0; c < 3; c++) p[c] += (side * wide[c] * Math.cos(a) + along[c] * Math.sin(a)) * (L / 3);
+      points.push([p[0], p[1], p[2]]);
+    }
+    return { t, points, width: Math.max(0.25, Math.min(0.75, 0.4 + (0.3 * L) / (7 * R)) * rs) };
+  }
 
   // --- branches: centre lines, frames and radii ----------------------------------------------
   const branchTubes: Tube[] = branches.map((b) => {
@@ -422,6 +529,32 @@ export function sweepShape(shape: ShapeDoc, q: SweepQuality, reuse?: SweepResult
     boundingRadius,
     curveLength: spline.length,
   };
+}
+
+/** Normal of the plane that fits the sampled curve best (its least spread direction). */
+function curvePlaneNormal(c: Float64Array, n: number): Vec3 {
+  const m = [0, 0, 0];
+  for (let i = 0; i < n; i++) for (let k = 0; k < 3; k++) m[k] += c[i * 3 + k] / n;
+  const C = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+  for (let i = 0; i < n; i++) {
+    for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) C[a * 3 + b] += (c[i * 3 + a] - m[a]) * (c[i * 3 + b] - m[b]);
+  }
+  // the two main directions by power iteration; the normal is perpendicular to both
+  const power = (M: number[], v: number[]) => {
+    for (let it = 0; it < 40; it++) {
+      const w = [0, 1, 2].map((a) => M[a * 3] * v[0] + M[a * 3 + 1] * v[1] + M[a * 3 + 2] * v[2]);
+      const l = Math.hypot(w[0], w[1], w[2]) || 1;
+      v = w.map((x) => x / l);
+    }
+    return v;
+  };
+  const e1 = power(C, [0.6, 0.7, 0.4]);
+  const l1 = [0, 1, 2].reduce((s, a) => s + e1[a] * (C[a * 3] * e1[0] + C[a * 3 + 1] * e1[1] + C[a * 3 + 2] * e1[2]), 0);
+  const C2 = C.map((x, i) => x - l1 * e1[Math.floor(i / 3)] * e1[i % 3]);
+  const e2 = power(C2, [-0.3, 0.5, 0.8]);
+  const nv = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+  const l = Math.hypot(nv[0], nv[1], nv[2]) || 1;
+  return [nv[0] / l, nv[1] / l, nv[2] / l];
 }
 
 function buildIndex(eff: EffectiveShape, q: SweepQuality, branchCount: number): Uint32Array {

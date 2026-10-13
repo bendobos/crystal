@@ -4,6 +4,7 @@ import { applyShapePreset, randomize } from '../../model/actions';
 import { Button, Section, Segmented, Slider, Toggle } from '../controls';
 import { IconDice } from '../icons';
 import { isDetailEmpty } from '../../geometry/fields';
+import { thornCount } from '../../geometry/sweep';
 import type { BrushMode } from '../../model/store';
 
 const BRUSH_MODES: { value: BrushMode; label: string; title: string }[] = [
@@ -32,6 +33,7 @@ export function FormPanel() {
   const tool = useStore((s) => s.tool);
   const setDoc = useStore((s) => s.setDoc);
   const closed = shape.closed && shape.points.length >= 3;
+  const thorns = thornCount(shape);
   const up = (patch: Partial<typeof shape>, key?: string) => updateDoc('shape', patch, key);
 
   return (
@@ -82,21 +84,20 @@ export function FormPanel() {
         <Toggle label="Geschlossene Form" value={shape.closed} onChange={(c) => up({ closed: c })} />
       </Section>
 
-      {!!shape.branches?.length && (
-        <Section title="Dornen">
-          <p className="hint">Die Dornen wachsen aus der Röhre und wandern mit, wenn du die Form bearbeitest.</p>
-          <Slider
-            label="Verschmelzen"
-            value={shape.blend ?? 1}
-            min={0}
-            max={1.2}
-            step={0.01}
-            format={(v) => (v < 0.01 ? 'aus' : `${Math.round(v * 100)} %`)}
-            onChange={(blend) => up({ blend })}
-          />
-          <Button onClick={() => up({ branches: undefined })}>Dornen entfernen</Button>
-        </Section>
-      )}
+      <Section title="Dornen">
+        <Slider label="Anzahl" value={thorns} min={0} max={16} step={1} onChange={(n) => up({ thorns: Math.round(n) })} />
+        <Slider
+          label="Verschmelzen"
+          value={shape.blend ?? 1}
+          min={0}
+          max={1.2}
+          step={0.01}
+          disabled={thorns === 0}
+          format={(v) => (v < 0.01 ? 'aus' : `${Math.round(v * 100)} %`)}
+          onChange={(blend) => up({ blend })}
+        />
+        {thorns > 0 && <p className="hint">Die Dornen wachsen aus der Röhre und wandern mit, wenn du die Form bearbeitest.</p>}
+      </Section>
 
       <Section title="Stränge">
         <Slider label="Anzahl" value={shape.strands} min={1} max={5} step={1} onChange={(strands) => up({ strands })} />

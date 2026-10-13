@@ -215,6 +215,32 @@ describe('sweep', () => {
     expect(folded / (I.length / 3)).toBeLessThan(5e-4);
   });
 
+  it('thins out or tops up thorns to the requested count', () => {
+    const s = shapePreset('neo-tribal');
+    const Q0: SweepQuality = { rings: 120, segments: 16, capRings: 3 };
+    const verts = (n: number) => sweepShape({ ...s, thorns: n }, Q0).positions.length;
+    const per = verts(1) - verts(0);
+    for (const n of [0, 2, 6, 10]) expect(verts(n)).toBe(verts(0) + n * per);
+    // reversible: going back to the designed count gives the designed shape
+    expect(sweepShape({ ...s, thorns: 6 }, Q0).positions).toEqual(sweepShape(s, Q0).positions);
+  });
+
+  it('adds thorns to any shape and fuses them into one closed mesh', () => {
+    const res = sweepShape(shape({ twist: 0, flatness: 0.5, thorns: 5 }), QUALITY_INTERACTIVE);
+    expect(res.topologyKey).toContain('fused');
+    const edges = new Map<string, number>();
+    for (let i = 0; i < res.index.length; i += 3) {
+      for (let e = 0; e < 3; e++) {
+        const k = `${res.index[i + e]}-${res.index[i + ((e + 1) % 3)]}`;
+        edges.set(k, (edges.get(k) ?? 0) + 1);
+      }
+    }
+    for (const [k, count] of edges) {
+      const [a, b] = k.split('-');
+      expect(count).toBe(edges.get(`${b}-${a}`));
+    }
+  });
+
   it('leaves multi-strand tubes and blend 0 unfused', () => {
     const s = shapePreset('neo-tribal');
     expect(sweepShape({ ...s, strands: 2 }, QUALITY_INTERACTIVE).topologyKey).not.toContain('fused');

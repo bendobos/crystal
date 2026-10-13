@@ -14,7 +14,7 @@ npm run build      # Typecheck + Produktions-Build inkl. Service Worker
 | Bereich | Dateien | Kurz |
 |---|---|---|
 | Szenen-Dokument | `src/model/` | `SceneDoc` (reine Daten), Zustand-Store mit eigener Undo-Historie, Vorlagen, Teilen-Link (`serialize.ts`, Zod-validiert), Projekte in IndexedDB |
-| Geometrie | `src/geometry/` | Zentripetale Catmull-Rom-Kurve nach Bogenlänge, rotationsminimierende Rahmen mit Holonomie-Korrektur, Sweep mit Strängen/Verdrehung/Endkappen, spitzen Enden und Dornen (Nebenröhren, mit Kehlen zu einem Mesh verschweißt, `blend.ts`), Feinform-Felder für den Pinsel, Freihand-Strich → Kurve (Kreuzungen über/unter) |
+| Geometrie | `src/geometry/` | Zentripetale Catmull-Rom-Kurve nach Bogenlänge, rotationsminimierende Rahmen mit Holonomie-Korrektur, Sweep mit Strängen/Verdrehung/Endkappen, spitzen Enden und Dornen (Nebenröhren, mit Kehlen zu einem Mesh verschweißt, `blend.ts`; „Anzahl“ dünnt entworfene Dornen gleichmäßig aus oder ergänzt Sicheldornen in der Kurvenebene), Feinform-Felder für den Pinsel, Freihand-Strich → Kurve (Kreuzungen über/unter) |
 | Rendering | `src/render/` | Eigener Glas-Raytracer in WebGL2 auf `three-mesh-bvh`: deterministische Live-Vorschau (`MODE preview`) und progressiver spektraler Pathtracer (`path`); Studio-Umgebung aus analytischen Lichtkarten, Kuppel und endlichem Hintergrundkarton; AgX/Neutral-Tonemapping, Bloom, Vignette, Korn |
 | Interaktion | `src/interaction/` | Kontrollpunkte, Glasbläser-Pinsel, Freihand, Lichtkugel und „Glanzlicht hierhin“ |
 | Export | `src/export/` | Kachel-Renderer mit GPU-Fences (UI bleibt flüssig), PNG/JPEG in sRGB oder Display P3, Format-Sets als ZIP/Teilen-Dialog, MP4/WebM-Loops über WebCodecs + Mediabunny |
