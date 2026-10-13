@@ -134,10 +134,12 @@ export function ExportPanel() {
           options={(['draft', 'high', 'max'] as const).map((q) => ({ value: q, label: QUALITY_LABEL[q], title: `${(settings.denoise ? QUALITY_SAMPLES_DENOISED : QUALITY_SAMPLES)[q]} Samples pro Pixel` }))}
           onChange={(quality) => setExport({ settings: { ...settings, quality } })}
         />
-        <Toggle label="Entrauschen (Experiment)" value={settings.denoise} onChange={(denoise) => setExport({ settings: { ...settings, denoise } })} />
-        {settings.denoise && (
-          <p className="hint">Etwa halb so viele Samples; das Rauschen im Glas wird anhand der rauschfreien Vorschau geglättet.</p>
-        )}
+        <Toggle label="Entrauschen" value={settings.denoise} onChange={(denoise) => setExport({ settings: { ...settings, denoise } })} />
+        <p className="hint">
+          {settings.denoise
+            ? 'Glättet das Rauschen im Glas, ohne Kanten zu verwischen. Fast doppelt so schnell bei gleicher Qualität.'
+            : 'Ohne Entrauschen: doppelt so viele Samples, feines Korn im Glas bleibt sichtbar.'}
+        </p>
         <Segmented
           label="Dateiformat"
           value={settings.format}

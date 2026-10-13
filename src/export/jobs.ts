@@ -26,7 +26,7 @@ export interface StillSettings {
   quality: ExportQuality;
   format: ImageFormat;
   space: OutputSpace;
-  /** Experimental: denoise the path traced glass with fewer samples. */
+  /** Denoise the path traced glass and render about half the samples. */
   denoise: boolean;
 }
 

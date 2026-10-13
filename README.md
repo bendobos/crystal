@@ -27,14 +27,14 @@ npm run build      # Typecheck + Produktions-Build inkl. Service Worker
 - **Hintergrundfarben sind exakt:** Die HDR-Radianz des Hintergrunds wird über die Umkehrung der Display-Transformation bestimmt (`render/color.ts` spiegelt den Composite-Shader).
 - **Vorschau in Stufen:** Beim Ziehen rendert der deterministische Tracer mit adaptiver Auflösung. Sobald die Ansicht ruht, folgen 6 gejitterte Durchgänge in nativer Auflösung (scharf, rauschfrei, nach Sekundenbruchteilen). Danach läuft der Pathtracer nur im Bildbereich, der Glas sehen kann (projizierte Bounding-Box ∩ Rahmen), und wird ab 16 Samples überblendet.
 - **GPU-Pacing (`render/adaptive.ts`):** Alle Hintergrundarbeit läuft in kurzen Bändern mit Fences. Die Viewport-Verfeinerung lässt die GPU per Duty-Cycle teilweise frei (`gpuBudget` je Stufe) und pausiert bei verdecktem Tab. Der Export nutzt kurze Draws (~24 ms), setzt aber nur etwa alle 120 ms einen Fence: Jeder Fence kostet eine Leerlauf-Rundreise.
-- **Entrauscher (Experiment, `render/denoise.ts`):** Export-Option „Entrauschen“ mit etwa halber Sample-Zahl. Ein kantenerhaltender À-trous-Filter glättet das Pathtracing-Bild. Er stoppt an Kanten der rauschfreien Vorschau und an Unterschieden, die das gemessene Rauschen übersteigen. Kacheln rendern dafür einen Rand von 64 px mit. Bei 320 Samples misst er gegen eine 1536-Sample-Referenz so genau wie 640 Samples ohne Entrauscher.
+- **Entrauscher (`render/denoise.ts`):** Standardmäßig an (Export-Option „Entrauschen“), mit etwa halber Sample-Zahl. Ein kantenerhaltender À-trous-Filter glättet das Pathtracing-Bild. Er stoppt an Kanten der rauschfreien Vorschau und an Unterschieden, die das gemessene Rauschen übersteigen. Kacheln rendern dafür einen Rand von 64 px mit. Bei 320 Samples misst er gegen eine 1536-Sample-Referenz so genau wie 640 Samples ohne Entrauscher.
 - **Adaptives Sampling:** Der Akkumulator führt im Alpha-Kanal das zweite Moment mit. Ein Konvergenztest pro 8×8-Block schätzt den Fehler nach Tonemapping in 8-Bit-Stufen und beendet ruhige Blöcke (Maske monoton, Mittel bleibt korrekt).
 
 ### Messwerte (MacBook M2, Chrome)
 
 - Deterministischer Tracer ≈ 6–10 ms/MP. Pathtracing: Hintergrund ≈ 3 ms/MP, Glaspixel ≈ 300–450 ms/MP pro Sample (lange Pfade). Die Exportzeit hängt fast nur von der Glasfläche ab.
 - Viewport: scharfe Vorschau ≈ 0,3–0,5 s nach dem Loslassen
-- iPhone-Wallpaper 1206×2622, „Maximal“ (640 Samples): ≈ 100 s; „Hoch“ (192): ≈ 30 s
+- Halbe iPhone-Auflösung 603×1311, „Maximal“: 78 s mit Entrauscher (320 Samples), 134 s ohne (640 Samples)
 - Video „Schnell“: ≈ 0,1 s pro Bild bei 482×1048
 
 ### Entwicklung
