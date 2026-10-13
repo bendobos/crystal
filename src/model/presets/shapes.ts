@@ -1,5 +1,7 @@
-import type { ShapeDoc, Vec3 } from '../types';
+import type { BranchDoc, ShapeDoc, Vec3 } from '../types';
+import { DETAIL_SIZE } from '../types';
 import { mulberry32 } from '../../util/random';
+import { createDetail } from '../../geometry/fields';
 
 export interface ShapePreset {
   id: string;
@@ -35,6 +37,47 @@ function tilt(points: Vec3[], ax: number, ay = 0): Vec3[] {
     const y1 = y * cx - z * sx;
     const z1 = y * sx + z * cx;
     return [x * cy + z1 * sy, y1, -x * sy + z1 * cy] as Vec3;
+  });
+}
+
+/**
+ * Neo-tribal ornament: a flat, S-shaped blade with sharp ends and sickle thorns curving off it.
+ * The blade swells where thorns branch off, like the brush-drawn originals.
+ */
+function neoTribal(): ShapeDoc {
+  const ax = -0.12;
+  const ay = 0.3;
+  const spine: Vec3[] = [
+    [0.55, -2.9, 0],
+    [0.15, -1.9, 0.15],
+    [-0.15, -0.8, 0.05],
+    [-0.05, 0.3, -0.1],
+    [0.35, 1.3, 0],
+    [0.2, 2.3, 0.12],
+    [-0.35, 3.0, 0],
+  ];
+  const thorns: BranchDoc[] = [
+    { t: 0.2, width: 0.75, points: [[-0.6, 0, 0.05], [-1.25, -0.3, 0.1], [-1.85, -0.25, 0], [-2.2, 0.1, -0.05]] },
+    { t: 0.34, width: 0.7, points: [[0.55, 0.15, 0], [1.1, 0.55, -0.05], [1.35, 1.15, 0], [1.2, 1.65, 0.05]] },
+    { t: 0.47, width: 0.65, points: [[-0.6, 0.1, 0], [-1.2, 0.05, 0.05], [-1.65, 0.35, 0], [-1.8, 0.85, -0.05]] },
+    // arcs out and back into the blade, leaving an eye
+    { t: 0.6, width: 0.45, points: [[-0.55, 0.25, 0.05], [-0.95, 0.75, 0.1], [-0.75, 1.25, 0.08], [-0.25, 1.35, 0.03], [0.12, 1.1, 0]] },
+    { t: 0.72, width: 0.65, points: [[0.6, 0.2, 0.05], [1.3, 0.55, 0], [1.95, 1.1, -0.05], [2.2, 1.7, 0]] },
+    { t: 0.86, width: 0.5, points: [[-0.45, 0.15, 0], [-0.85, 0.5, 0], [-0.95, 0.95, 0]] },
+  ];
+  const detail = createDetail();
+  for (let i = 0; i < DETAIL_SIZE; i++) {
+    const t = i / (DETAIL_SIZE - 1);
+    for (const b of thorns) detail.radius[i] += 0.4 * Math.exp(-0.5 * ((t - b.t) / 0.045) ** 2);
+  }
+  return base(tilt(spine, ax, ay), {
+    closed: false,
+    radius: 0.3,
+    flatness: 0.5,
+    roundness: 0.15,
+    taper: 0.55,
+    detail,
+    branches: thorns.map((b) => ({ ...b, points: tilt(b.points, ax, ay) })),
   });
 }
 
@@ -150,6 +193,7 @@ export const SHAPE_PRESETS: ShapePreset[] = [
         { closed: false, radius: 0.28, flatness: 0.55, twist: 1.5 },
       ),
   },
+  { id: 'neo-tribal', name: 'Neo Tribal', build: neoTribal },
 ];
 
 export function shapePreset(id: string): ShapeDoc {
@@ -182,6 +226,17 @@ export function randomizeShape(shape: ShapeDoc, seed: number): ShapeDoc {
   });
   const closed = shape.closed;
   const strands = rnd() < 0.3 ? 2 + Math.floor(rnd() * 2) : 1;
+  // thorns: vary length, angle (around the view axis) and thickness
+  const branches = shape.branches?.map((b) => {
+    const k = 0.8 + rnd() * 0.45;
+    const a = (rnd() - 0.5) * 0.7;
+    const c = Math.cos(a) * k, s = Math.sin(a) * k;
+    return {
+      t: Math.min(0.97, Math.max(0.03, b.t + (rnd() - 0.5) * 0.06)),
+      width: b.width * (0.85 + rnd() * 0.3),
+      points: b.points.map(([x, y, z]) => [x * c - y * s, x * s + y * c, z * k] as Vec3),
+    };
+  });
   return {
     ...shape,
     points,
@@ -193,5 +248,6 @@ export function randomizeShape(shape: ShapeDoc, seed: number): ShapeDoc {
     strandSpread: 1.1 + rnd() * 0.6,
     strandTwist: strands > 1 ? Math.round(rnd() * 2) / strands : 0,
     detail: null,
+    branches,
   };
 }

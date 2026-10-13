@@ -143,6 +143,47 @@ describe('sweep', () => {
     }
   });
 
+  it('tapered tubes with thorns are watertight and end in points', () => {
+    const s = shape({
+      closed: false,
+      points: [[0, -2, 0], [0.3, 0, 0], [0, 2, 0]],
+      taper: 0.6,
+      branches: [
+        { t: 0.4, width: 0.7, points: [[0.8, 0.3, 0], [1.4, 1, 0]] },
+        { t: 0.7, width: 0.5, points: [[-0.9, 0.4, 0.1]] },
+      ],
+    });
+    const res = sweepShape(s, Q);
+    const edges = new Map<string, number>();
+    for (let i = 0; i < res.index.length; i += 3) {
+      for (let e = 0; e < 3; e++) {
+        const a = res.index[i + e];
+        const b = res.index[i + ((e + 1) % 3)];
+        edges.set(`${a}-${b}`, (edges.get(`${a}-${b}`) ?? 0) + 1);
+      }
+    }
+    for (const [k, count] of edges) {
+      expect(count).toBe(1);
+      const [a, b] = k.split('-');
+      expect(edges.has(`${b}-${a}`)).toBe(true);
+    }
+    // every vertex is referenced (branches are fully indexed)
+    const used = new Uint8Array(res.positions.length / 3);
+    for (const v of res.index) used[v] = 1;
+    expect(used.every((u) => u === 1)).toBe(true);
+    // the thorn tip reaches its last control point (anchor + offset)
+    const anchor = new ArcSpline(s.points, false).pointAt(0.4, [0, 0, 0]);
+    let best = Infinity;
+    for (let v = 0; v < res.positions.length / 3; v++) {
+      best = Math.min(
+        best,
+        Math.hypot(res.positions[v * 3] - anchor[0] - 1.4, res.positions[v * 3 + 1] - anchor[1] - 1, res.positions[v * 3 + 2] - anchor[2]),
+      );
+    }
+    expect(best).toBeLessThan(0.15);
+    expect(topologyKeyFor(s, Q)).not.toBe(topologyKeyFor({ ...s, branches: [] }, Q));
+  });
+
   it('keeps topology when only continuous parameters change (refit-safe)', () => {
     const a = shape();
     const k1 = topologyKeyFor(a, Q);

@@ -69,8 +69,25 @@ export function FormPanel() {
           format={(v) => `${(closed ? Math.round(v * 2) / 2 : v).toFixed(closed ? 1 : 2)} U.`}
           onChange={(twist) => up({ twist })}
         />
+        <Slider
+          label="Spitze Enden"
+          value={shape.taper ?? 0}
+          min={0}
+          max={1}
+          step={0.01}
+          disabled={closed}
+          format={(v) => (v < 0.01 ? 'aus' : `${Math.round(v * 100)} %`)}
+          onChange={(taper) => up({ taper })}
+        />
         <Toggle label="Geschlossene Form" value={shape.closed} onChange={(c) => up({ closed: c })} />
       </Section>
+
+      {!!shape.branches?.length && (
+        <Section title="Dornen">
+          <p className="hint">Die Dornen wachsen aus der Röhre und wandern mit, wenn du die Form bearbeitest.</p>
+          <Button onClick={() => up({ branches: undefined })}>Dornen entfernen</Button>
+        </Section>
+      )}
 
       <Section title="Stränge">
         <Slider label="Anzahl" value={shape.strands} min={1} max={5} step={1} onChange={(strands) => up({ strands })} />

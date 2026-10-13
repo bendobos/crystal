@@ -53,8 +53,11 @@ export function createFrames(count: number): Frames {
   };
 }
 
-/** Fills `frames` for the curve sampled at `pos` (count points). */
-export function computeFrames(pos: Float64Array, count: number, closed: boolean, frames: Frames): void {
+/**
+ * Fills `frames` for the curve sampled at `pos` (count points). The first normal is chosen as
+ * close as possible to `up` (default: world up).
+ */
+export function computeFrames(pos: Float64Array, count: number, closed: boolean, frames: Frames, up?: readonly number[]): void {
   const T = frames.tangent;
   const N = frames.normal;
   const B = frames.binormal;
@@ -68,7 +71,11 @@ export function computeFrames(pos: Float64Array, count: number, closed: boolean,
     let ux = 0;
     let uy = 1;
     let uz = 0;
-    if (Math.abs(ty) > 0.9) {
+    if (up && Math.abs(up[0] * tx + up[1] * ty + up[2] * tz) < 0.98 * Math.hypot(up[0], up[1], up[2])) {
+      ux = up[0];
+      uy = up[1];
+      uz = up[2];
+    } else if (Math.abs(ty) > 0.9) {
       ux = 0;
       uy = 0;
       uz = 1;

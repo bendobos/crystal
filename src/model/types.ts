@@ -17,6 +17,16 @@ export interface DetailFields {
   twist: Float32Array;
 }
 
+/** A thorn growing out of the main tube: an open tube that tapers to a sharp tip. */
+export interface BranchDoc {
+  /** Anchor on the main curve (normalized arc length). */
+  t: number;
+  /** Control points relative to the anchor; the branch starts at the anchor itself. */
+  points: Vec3[];
+  /** Base radius in multiples of the main radius. */
+  width: number;
+}
+
 export interface ShapeDoc {
   points: Vec3[];
   closed: boolean;
@@ -34,6 +44,10 @@ export interface ShapeDoc {
   /** Turns the strands wind around each other (closed curves snap to 1/strands). */
   strandTwist: number;
   detail: DetailFields | null;
+  /** 0 = blunt ends, 1 = open curves taper to sharp points over half their length. */
+  taper?: number;
+  /** Thorns that branch off the main tube; they follow its anchor point when it moves. */
+  branches?: BranchDoc[];
   /** Animation offsets (not edited directly): profile rotation and strand rotation in radians. */
   phase?: number;
   strandPhase?: number;

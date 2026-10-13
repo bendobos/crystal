@@ -366,7 +366,7 @@ function applyStroke(pts: P2[]): void {
     st.set({ toast: 'Strich zu kurz' });
     return;
   }
-  st.setDoc((d) => ({ ...d, shape: { ...d.shape, points: res.points, closed: res.closed, detail: null } }));
+  st.setDoc((d) => ({ ...d, shape: { ...d.shape, points: res.points, closed: res.closed, detail: null, branches: undefined } }));
   st.set({ toast: res.closed ? 'Geschlossene Form erzeugt' : 'Offene Form erzeugt' });
 }
 

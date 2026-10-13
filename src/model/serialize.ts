@@ -22,6 +22,11 @@ const schema = z.object({
     strandSpread: num(0, 10),
     strandTwist: num(-50, 50),
     detail: z.string().max(8000).nullable(),
+    taper: num(0, 1).optional(),
+    branches: z
+      .array(z.object({ t: num(0, 1), points: z.array(vec3).min(1).max(40), width: num(0.01, 5) }))
+      .max(24)
+      .optional(),
   }),
   glass: z.object({
     ior: num(1, 3),

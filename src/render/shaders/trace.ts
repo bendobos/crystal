@@ -131,7 +131,9 @@ vec4 trace( vec3 ro, vec3 rd, vec2 uv ) {
 	int inside = 0;
 	float alpha = 0.0;
 
-	for ( int b = 0; b < 32; b ++ ) {
+	// b counts interface events; passing between overlapping parts (strands, thorns) is free
+	int b = 0;
+	for ( int i = 0; i < 48; i ++ ) {
 		if ( b >= uMaxBounces ) break;
 		uvec4 faceIndices = uvec4( 0u );
 		vec3 faceNormal = vec3( 0.0, 0.0, 1.0 );
@@ -171,6 +173,7 @@ vec4 trace( vec3 ro, vec3 rd, vec2 uv ) {
 			rd = refl;
 			ro = p + Ng * uEps;
 			inside = 1;
+			b ++;
 			continue;
 		}
 
@@ -192,6 +195,7 @@ vec4 trace( vec3 ro, vec3 rd, vec2 uv ) {
 		rd = refrG;
 		ro = p - Ng * uEps;
 		if ( max( thr.r, max( thr.g, thr.b ) ) < 0.002 ) return vec4( col, alpha );
+		b ++;
 	}
 	return vec4( col + thr * envDispersed( ro, rd, sR, sB ), alpha );
 }
@@ -280,7 +284,8 @@ vec4 trace( vec3 ro, vec3 rd, vec2 uv, float lambda, vec4 offs, inout uint rng )
 	float alpha = 0.0;
 	vec3 w = spectralWeight( lambda );
 
-	for ( int b = 0; b < 64; b ++ ) {
+	int b = 0;
+	for ( int i = 0; i < 64; i ++ ) {
 		if ( b >= uMaxBounces ) break;
 		uvec4 faceIndices = uvec4( 0u );
 		vec3 faceNormal = vec3( 0.0, 0.0, 1.0 );
@@ -332,6 +337,7 @@ vec4 trace( vec3 ro, vec3 rd, vec2 uv, float lambda, vec4 offs, inout uint rng )
 			ro = p - Ng * uEps;
 			if ( uDispersion > 0.0 ) spectral = true;
 		}
+		b ++;
 	}
 	return vec4( thr * environment( ro, rd ) * ( spectral ? w : vec3( 1.0 ) ), alpha );
 }

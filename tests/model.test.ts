@@ -6,6 +6,7 @@ import { createDetail } from '../src/geometry/fields';
 import { displayTransform, inverseDisplay, hexToSrgb } from '../src/render/color';
 import { cauchy, iorAt, previewTaps, spectralNormalization, wavelengthToLinearSrgb } from '../src/render/spectral';
 import { frameAt } from '../src/export/loops';
+import { shapePreset } from '../src/model/presets/shapes';
 import type { Vec3 } from '../src/model/types';
 
 function figureEight(n = 200, a = 200): P2[] {
@@ -79,6 +80,17 @@ describe('serialization', () => {
     expect(back.shape.detail!.offset[33]).toBeCloseTo(-0.25, 3);
     expect(back.shape.detail!.twist[100]).toBeCloseTo(1.2, 3);
     expect(back.exportTargets[1].camera).not.toBeNull();
+  });
+
+  it('round-trips thorns and tapered ends', () => {
+    const doc = { ...createDefaultDoc(), shape: shapePreset('neo-tribal') };
+    const back = decodeShare(encodeShare(doc));
+    expect(back.shape.taper).toBeCloseTo(doc.shape.taper!, 3);
+    expect(back.shape.branches).toHaveLength(doc.shape.branches!.length);
+    expect(back.shape.branches![1].points[2][0]).toBeCloseTo(doc.shape.branches![1].points[2][0], 3);
+    // older links without the new fields still load
+    const old = toJSON(createDefaultDoc()) as { shape: Record<string, unknown> };
+    expect(fromJSON(old).shape.branches).toBeUndefined();
   });
 
   it('rejects malformed or hostile data', () => {
