@@ -3,7 +3,7 @@ import { FORMATS, formatById } from '../../export/formats';
 import { exportTarget } from '../../model/defaults';
 import { fitCamera } from '../../model/fit';
 import { useExport } from '../../export/exportStore';
-import { exportStills, QUALITY_LABEL, QUALITY_SAMPLES, type ExportQuality } from '../../export/jobs';
+import { exportStills, QUALITY_LABEL, QUALITY_SAMPLES, QUALITY_SAMPLES_DENOISED, type ExportQuality } from '../../export/jobs';
 import { Button, Section, Segmented, Select, Toggle } from '../controls';
 import { IconDownload, IconPlus, IconTrash, IconPhone, IconMonitor } from '../icons';
 import type { ExportTargetDoc, SceneDoc } from '../../model/types';
@@ -131,9 +131,13 @@ export function ExportPanel() {
         <Segmented<ExportQuality>
           label="Qualität"
           value={settings.quality}
-          options={(['draft', 'high', 'max'] as const).map((q) => ({ value: q, label: QUALITY_LABEL[q], title: `${QUALITY_SAMPLES[q]} Samples pro Pixel` }))}
+          options={(['draft', 'high', 'max'] as const).map((q) => ({ value: q, label: QUALITY_LABEL[q], title: `${(settings.denoise ? QUALITY_SAMPLES_DENOISED : QUALITY_SAMPLES)[q]} Samples pro Pixel` }))}
           onChange={(quality) => setExport({ settings: { ...settings, quality } })}
         />
+        <Toggle label="Entrauschen (Experiment)" value={settings.denoise} onChange={(denoise) => setExport({ settings: { ...settings, denoise } })} />
+        {settings.denoise && (
+          <p className="hint">Etwa halb so viele Samples; das Rauschen im Glas wird anhand der rauschfreien Vorschau geglättet.</p>
+        )}
         <Segmented
           label="Dateiformat"
           value={settings.format}

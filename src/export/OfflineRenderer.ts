@@ -18,6 +18,7 @@ import {
   projectedRect,
   type AdaptiveSettings,
 } from '../render/adaptive';
+import { DENOISE_APRON, Denoiser } from '../render/denoise';
 
 /** Cost of a deterministic pass per pixel relative to a path sample (for progress estimates). */
 const PREVIEW_COST = 0.05;
@@ -34,6 +35,8 @@ export interface OfflineOptions {
   preview?: boolean;
   /** Stop sampling blocks once they have converged (`samples` stays the upper bound). */
   adaptive?: AdaptiveSettings;
+  /** Denoise the path traced glass, guided by the deterministic preview. */
+  denoise?: boolean;
   signal?: AbortSignal;
   onProgress?: (fraction: number) => void;
 }
@@ -47,9 +50,11 @@ export interface RenderedImage {
 }
 
 interface Region {
-  /** Size of the surface (tile or bloom source). */
+  /** Size of the surface (tile plus apron, or bloom source). */
   w: number;
   h: number;
+  /** The pixels the region outputs, within the surface. */
+  inner: Rect;
   /** The image frame relative to the surface (top-left origin). */
   frame: Rect;
   /** Part of the surface that can see the glass, or null. */
@@ -148,6 +153,8 @@ export class OfflineRenderer {
 
     const tilesX = Math.ceil(W / tile);
     const tilesY = Math.ceil(H / tile);
+    // the denoiser reads neighbours: tiles trace a margin around the pixels they output
+    const apron = opts.denoise && !preview ? DENOISE_APRON : 0;
     const regions: Region[] = [];
     for (let ty = 0; ty < tilesY; ty++) {
       for (let tx = 0; tx < tilesX; tx++) {
@@ -155,9 +162,19 @@ export class OfflineRenderer {
         const y0 = ty * tile;
         const tw = Math.min(tile, W - x0);
         const th = Math.min(tile, H - y0);
-        const g = glass && intersectRect(glass, { x: x0, y: y0, w: tw, h: th });
-        // the frame extends beyond the tile: tile pixel (0,0) is image pixel (x0, y0)
-        regions.push({ w: tw, h: th, frame: { x: -x0, y: -y0, w: W, h: H }, glass: g && { x: g.x - x0, y: g.y - y0, w: g.w, h: g.h } });
+        const ex = Math.max(0, x0 - apron);
+        const ey = Math.max(0, y0 - apron);
+        const ew = Math.min(W, x0 + tw + apron) - ex;
+        const eh = Math.min(H, y0 + th + apron) - ey;
+        const g = glass && intersectRect(glass, { x: ex, y: ey, w: ew, h: eh });
+        // the frame extends beyond the surface: surface pixel (0,0) is image pixel (ex, ey)
+        regions.push({
+          w: ew,
+          h: eh,
+          inner: { x: x0 - ex, y: y0 - ey, w: tw, h: th },
+          frame: { x: -ex, y: -ey, w: W, h: H },
+          glass: g && { x: g.x - ex, y: g.y - ey, w: g.w, h: g.h },
+        });
       }
     }
     let bloomRegion: Region | null = null;
@@ -165,7 +182,7 @@ export class OfflineRenderer {
     if (fx.bloom > 0) {
       const bh = Math.min(720, H);
       const bw = Math.max(1, Math.round((bh * W) / H));
-      bloomRegion = { w: bw, h: bh, frame: { x: 0, y: 0, w: bw, h: bh }, glass: glassIn(bw, bh) };
+      bloomRegion = { w: bw, h: bh, inner: { x: 0, y: 0, w: bw, h: bh }, frame: { x: 0, y: 0, w: bw, h: bh }, glass: glassIn(bw, bh) };
     }
 
     const cost = (r: Region, n: number) => r.w * r.h * PREVIEW_AA.length * PREVIEW_COST + (r.glass ? r.glass.w * r.glass.h * n : 0);
@@ -181,6 +198,7 @@ export class OfflineRenderer {
       }
     };
 
+    const denoiser = opts.denoise && !preview ? new Denoiser(e.floatType) : null;
     const t: Targets = {
       preview: [this.floatRT(tile, tile), this.floatRT(tile, tile)],
       accum: [this.floatRT(1, 1), this.floatRT(1, 1)],
@@ -209,7 +227,7 @@ export class OfflineRenderer {
           accum: [this.floatRT(1, 1), this.floatRT(1, 1)],
           mask: [makeMaskRT(1, 1), makeMaskRT(1, 1)],
         };
-        const traced = await this.traceRegion(r, bloomSamples, bloomSrc, ctx);
+        const traced = (await this.traceRegion(r, bloomSamples, bloomSrc, ctx)) > 0;
         const g = traced ? r.glass! : null;
         bloom.setSize(r.w * 2, r.h * 2);
         bloomTex = bloom.render(
@@ -233,18 +251,24 @@ export class OfflineRenderer {
         const r = regions[i];
         const x0 = (i % tilesX) * tile;
         const y0 = Math.floor(i / tilesX) * tile;
-        const { w: tw, h: th } = r;
+        const { w: tw, h: th } = r.inner;
         const traced = await this.traceRegion(r, samples, t, ctx);
-        // composite the tile
+        const g = r.glass ?? { x: 0, y: 0, w: 1, h: 1 };
+        let accum: Texture = t.accum[0].texture;
+        if (traced > 0 && denoiser) {
+          // guide: the preview pixels under the glass part (GL origin)
+          accum = denoiser.run(e.renderer, e.quad, accum, traced, t.preview[0].texture, [g.x, r.h - g.y - g.h, g.w, g.h]);
+        }
+        // composite the pixels the tile outputs
         const c = e.compositeMaterial.uniforms;
         c.uPreview.value = t.preview[0].texture;
-        const pw = t.preview[0].width;
-        const ph = t.preview[0].height;
-        (c.uPreviewTransform.value as Vector4).set(1, 1, (pw - 0.5) / pw, (ph - 0.5) / ph);
-        c.uAccum.value = t.accum[0].texture;
-        const g = r.glass ?? { x: 0, y: 0, w: 1, h: 1 };
-        (c.uAccumRect.value as Vector4).set(g.x, th - (g.y + g.h), g.w, g.h);
-        c.uMixAccum.value = traced ? 1 : 0;
+        const ox = r.inner.x;
+        const oy = r.h - r.inner.y - th; // GL origin
+        (c.uPreviewTransform.value as Vector4).set(tw / r.w, th / r.h, ox / r.w, oy / r.h);
+        (c.uPreviewMax.value as Vector2).set(1, 1);
+        c.uAccum.value = accum;
+        (c.uAccumRect.value as Vector4).set(g.x - ox, r.h - (g.y + g.h) - oy, g.w, g.h);
+        c.uMixAccum.value = traced > 0 ? 1 : 0;
         c.uBloom.value = bloomTex ?? e.blackTexture;
         // GL uv: tile covers [x0, x0+tw] × [H-y0-th, H-y0] of the frame
         (c.uBloomTransform.value as Vector4).set(tw / W, th / H, x0 / W, (H - y0 - th) / H);
@@ -272,6 +296,7 @@ export class OfflineRenderer {
       if (bloomSrc) rts.push(...bloomSrc.preview, ...bloomSrc.accum, ...bloomSrc.mask);
       for (const rt of rts) rt.dispose();
       bloom.dispose();
+      denoiser?.dispose();
       pu.uMaxBounces.value = 24;
       pu.uUseMask.value = 0;
       e.renderer.setRenderTarget(null);
@@ -280,7 +305,7 @@ export class OfflineRenderer {
 
   /**
    * Renders a region: anti-aliased deterministic passes over all of it into `t.preview[0]`, then
-   * path tracing over its glass part into `t.accum[0]`. Returns whether path tracing ran.
+   * path tracing over its glass part into `t.accum[0]`. Returns the samples traced (0: none).
    */
   private async traceRegion(
     r: Region,
@@ -294,7 +319,7 @@ export class OfflineRenderer {
       adaptive?: AdaptiveSettings;
       work: (units: number) => void;
     },
-  ): Promise<boolean> {
+  ): Promise<number> {
     const e = this.engine;
     const { basis, tanHalf, pacer, signal, adaptive, work } = ctx;
     for (const rt of t.preview) rt.setSize(r.w, r.h);
@@ -315,7 +340,7 @@ export class OfflineRenderer {
     (pv.uJitter.value as Vector2).set(0, 0);
 
     const g = r.glass;
-    if (!g || samples <= 0) return false;
+    if (!g || samples <= 0) return 0;
     for (const rt of t.accum) rt.setSize(g.w, g.h);
     const [mw, mh] = maskSize(g.w, g.h);
     for (const rt of t.mask) rt.setSize(mw, mh);
@@ -324,6 +349,7 @@ export class OfflineRenderer {
     const frame: Rect = { x: r.frame.x - g.x, y: r.frame.y - g.y, w: r.frame.w, h: r.frame.h };
     const pu = e.pathMaterial.uniforms;
     const px = g.w * g.h;
+    let traced = 0;
     for (let s = 0; s < samples; s++) {
       e.setFrameUniforms(pu, g.w, g.h, frame, basis, tanHalf);
       pu.uPrev.value = t.accum[0].texture;
@@ -334,6 +360,7 @@ export class OfflineRenderer {
       await this.bands(t.accum[1], 'path', pacer, signal, work, e.pathMaterial);
       t.accum.reverse();
       const n = s + 1;
+      traced = n;
       if (adaptive && n >= adaptive.minSamples && n % CHECK_INTERVAL === 0 && n < samples) {
         const u = e.convergenceMaterial.uniforms;
         u.uAccum.value = t.accum[0].texture;
@@ -355,7 +382,7 @@ export class OfflineRenderer {
       }
     }
     pu.uUseMask.value = 0;
-    return true;
+    return traced;
   }
 
   /** Draws `material` over `target` in paced row bands. */

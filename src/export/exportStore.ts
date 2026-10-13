@@ -25,7 +25,7 @@ function defaultSpace(): 'srgb' | 'p3' {
 }
 
 export const useExport = create<ExportState>((set) => ({
-  settings: { quality: 'high', format: 'png', space: defaultSpace() },
+  settings: { quality: 'high', format: 'png', space: defaultSpace(), denoise: false },
   deviceOverlay: true,
   job: null,
   set: (p) => set(p),

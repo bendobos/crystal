@@ -10,6 +10,11 @@ export type ExportQuality = 'draft' | 'high' | 'max';
 
 /** Upper bound of path samples per pixel; converged blocks stop earlier (QUALITY_ADAPTIVE). */
 export const QUALITY_SAMPLES: Record<ExportQuality, number> = { draft: 48, high: 192, max: 640 };
+/**
+ * Samples with the denoiser: chosen so the error against a reference matches (or beats) the
+ * undenoised setting of the same quality.
+ */
+export const QUALITY_SAMPLES_DENOISED: Record<ExportQuality, number> = { draft: 24, high: 80, max: 320 };
 export const QUALITY_ADAPTIVE: Record<ExportQuality, AdaptiveSettings> = {
   draft: { minSamples: 16, tolerance: 2 },
   high: { minSamples: 32, tolerance: 1 },
@@ -21,6 +26,8 @@ export interface StillSettings {
   quality: ExportQuality;
   format: ImageFormat;
   space: OutputSpace;
+  /** Experimental: denoise the path traced glass with fewer samples. */
+  denoise: boolean;
 }
 
 export interface ExportProgress {
@@ -46,7 +53,7 @@ export async function exportStills(
   const engine = getEngine();
   if (!engine) throw new Error('Renderer nicht bereit');
   const tile = window.matchMedia?.('(pointer: coarse)').matches ? 768 : 1024;
-  const samples = QUALITY_SAMPLES[settings.quality];
+  const samples = (settings.denoise ? QUALITY_SAMPLES_DENOISED : QUALITY_SAMPLES)[settings.quality];
   const totalPixels = targets.reduce((a, t) => a + t.width * t.height, 0);
   let donePixels = 0;
   const t0 = performance.now();
@@ -73,6 +80,7 @@ export async function exportStills(
         camera: t.camera ?? doc.camera,
         samples,
         adaptive: QUALITY_ADAPTIVE[settings.quality],
+        denoise: settings.denoise,
         space: settings.space,
         tileSize: tile,
         signal,

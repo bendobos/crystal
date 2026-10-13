@@ -67,7 +67,8 @@ uniform sampler2D uPreview;
 uniform sampler2D uAccum;
 uniform sampler2D uBloom;
 uniform vec4 uBloomTransform;   // bloom texture covers the frame; maps vUv into it
-uniform vec4 uPreviewTransform; // xy: uv scale into the used part of uPreview, zw: largest uv
+uniform vec4 uPreviewTransform; // maps vUv into uPreview: xy scale, zw offset
+uniform vec2 uPreviewMax;       // largest uv inside the used part of uPreview
 uniform vec4 uAccumRect;        // output pixels covered by uAccum: xy origin, zw size
 uniform float uMixAccum;
 uniform float uBloomStrength;
@@ -108,7 +109,7 @@ vec3 accumAt( vec2 q ) {
 }
 
 void main() {
-	vec3 pre = texture( uPreview, min( vUv * uPreviewTransform.xy, uPreviewTransform.zw ) ).rgb;
+	vec3 pre = texture( uPreview, min( vUv * uPreviewTransform.xy + uPreviewTransform.zw, uPreviewMax ) ).rgb;
 	vec3 hdr = pre;
 	vec2 q = ( gl_FragCoord.xy - uAccumRect.xy ) / uAccumRect.zw;
 	if ( uMixAccum > 0.0 && all( greaterThanEqual( q, vec2( 0.0 ) ) ) && all( lessThan( q, vec2( 1.0 ) ) ) ) {

@@ -263,7 +263,8 @@ export class Engine {
         uAccum: { value: null },
         uBloom: { value: this.blackTexture },
         uBloomTransform: { value: new Vector4(1, 1, 0, 0) },
-        uPreviewTransform: { value: new Vector4(1, 1, 1, 1) },
+        uPreviewTransform: { value: new Vector4(1, 1, 0, 0) },
+        uPreviewMax: { value: new Vector2(1, 1) },
         uAccumRect: { value: new Vector4(0, 0, 1, 1) },
         uMixAccum: { value: 0 },
         uBloomStrength: { value: 0 },
@@ -1104,7 +1105,8 @@ export class Engine {
     c.uPreview.value = s.rt.texture;
     const pw = s.rt.width;
     const ph = s.rt.height;
-    (c.uPreviewTransform.value as Vector4).set(s.w / pw, s.h / ph, (s.w - 0.5) / pw, (s.h - 0.5) / ph);
+    (c.uPreviewTransform.value as Vector4).set(s.w / pw, s.h / ph, 0, 0);
+    (c.uPreviewMax.value as Vector2).set((s.w - 0.5) / pw, (s.h - 0.5) / ph);
     c.uAccum.value = this.accumA.texture;
     (c.uAccumRect.value as Vector4).set(...this.accumRectGL());
     c.uMixAccum.value = this.mixAccum();
